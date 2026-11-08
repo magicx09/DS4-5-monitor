@@ -771,6 +771,7 @@ void CORE0_RAM_FUNC(audio_loop)() {
 }
 
 void audio_init() {
+    ds4_audio_init();
     // lifetime: NOT-WORTH — boot, once per firmware run; the queue lives until reset
     queue_init(&haptics_fifo, sizeof(haptics_element), 2);
 #if !DISABLE_SPEAKER_PROC
@@ -898,6 +899,10 @@ void __not_in_flash_func(core1_entry)() {
     g_c1_stage = 3;
     g_c1_flags |= 0x01;
     g_c1_free_heap = free_heap_bytes();
+    // The controller type is discovered after the audio core has started.
+    // Initialize the small DS4 SBC encoder unconditionally, then service it
+    // only while a DS4 link is active.
+    ds4_audio_core1_start();
     int error = 0;
     // Never return from here: a stopped core1 can't be parked for flash
     // writes, so every save would fail too (issue #15). Without an encoder
@@ -949,20 +954,24 @@ void __not_in_flash_func(core1_entry)() {
         g_c1_stage = 9;  // running: stage 9 and c1_loops moving
         g_c1_loops = g_c1_loops + 1;
         bool work = false;
+        if (bt_is_ds4()) {
+            ds4_audio_core1_step();
+        } else {
 #if !DISABLE_SPEAKER_PROC
-        if (g_spk_ready && !queue_is_empty(&audio_fifo)) {
-            const uint32_t t0 = perf_now();
-            speaker_proc();
-            perf_record(PERF_C1_SPEAKER, perf_now() - t0);
-            work = true;
-        }
-#endif
-        if (mic_decoder != nullptr) {
-            const uint32_t t0 = perf_now();
-            // error: NOT-WORTH — nothing; false = no mic frame this pass (session idle), not an error
-            if (mic_proc()) {
-                perf_record(PERF_C1_MIC, perf_now() - t0);
+            if (g_spk_ready && !queue_is_empty(&audio_fifo)) {
+                const uint32_t t0 = perf_now();
+                speaker_proc();
+                perf_record(PERF_C1_SPEAKER, perf_now() - t0);
                 work = true;
+            }
+#endif
+            if (mic_decoder != nullptr) {
+                const uint32_t t0 = perf_now();
+                // error: NOT-WORTH — nothing; false = no mic frame this pass (session idle), not an error
+                if (mic_proc()) {
+                    perf_record(PERF_C1_MIC, perf_now() - t0);
+                    work = true;
+                }
             }
         }
         // Idle without spinning on the queue spinlocks (starves core0's bus).

@@ -25,6 +25,8 @@ extern bool spk_active;                 // main.cpp
 extern uint8_t interrupt_in_data[63];   // main.cpp
 
 bool g_usb_wake_keyboard = false;
+bool g_usb_ds4 = false;
+static bool s_controller_ready = false;
 
 namespace {
 usbpm::Machine s_pm;
@@ -59,6 +61,7 @@ void detach() {
 
 void attach(usbpm::Mode m, uint64_t now) {
     g_usb_wake_keyboard = m == usbpm::Mode::Keyboard;
+    g_usb_ds4 = m == usbpm::Mode::Full && bt_is_ds4();
     // error: NOT-WORTH — nothing; tud_connect/disconnect only fail on a port without D+ pull-up control, which the RP2350 has
     if (m != usbpm::Mode::Off) tud_connect();
     s_pm.presented(m, now);
@@ -98,6 +101,7 @@ bool usb_power_wake_enabled() {
 }
 
 void usb_power_controller(bool ready) {
+    s_controller_ready = ready;
     s_pm.controller(ready, time_us_64());
 }
 
@@ -126,6 +130,11 @@ void usb_power_task() {
     }
     // A bus reset or a resume TinyUSB didn't report as one: running again.
     if (s_pm.suspended() && tud_connected() && !tud_suspended()) s_pm.resume(now);
+    if (s_controller_ready && !s_pm.suspended() && s_pm.mode() == usbpm::Mode::Full &&
+        g_usb_ds4 != bt_is_ds4()) {
+        present(usbpm::Mode::Full, now);
+        return;
+    }
     if (bt_is_connected()) s_pm.buttons(interrupt_in_data[7], interrupt_in_data[8], interrupt_in_data[9]);
 
     const bool kbd_ready = g_usb_wake_keyboard && tud_hid_n_ready(0);

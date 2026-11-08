@@ -20,7 +20,9 @@ int  slot_owner_of(const uint8_t addr[6]);
 int  slot_for_controller(int current, const uint8_t addr[6]);
 // These three change the table in RAM, then save it: false = not saved
 // (the flash write failed), so the change is lost at power-off.
-bool slot_assign(int slot, const uint8_t addr[6]);
+bool slot_assign(int slot, const uint8_t addr[6], bool ds4 = false);
+bool slot_is_ds4(int slot);
+uint32_t slot_generation(int slot); // changes on forget/replacement, even for the same MAC
 bool slot_forget(int slot);
 bool slots_wipe_all();
 bool slots_any_empty();

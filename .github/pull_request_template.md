@@ -1,26 +1,13 @@
-<!-- Thank you! One focused change per pull request. CONTRIBUTING.md has the details. -->
+## 改动与原因
 
-## What this changes
+说明玩家遇到的问题，以及修改后的行为。
 
-<!-- What it does and why, in a few lines. Link the issue or discussion if there is one (Fixes #123). -->
+## 验证
 
-## How it was checked
+- 主机测试与 prop14/prop16 渲染测试：
+- prop16 固件构建及 flash / RAM / XIP 检查：
+- 实机型号、场景和结果（未测试请直说）：
 
-- [ ] `tests/host/run.sh build/host-tests` passes, and a fix to pure logic comes with a host test that fails without it
-- [ ] `tests/host/fixtures/config/gen/stable_reads.sh` passes (the last stable release reads the settings saved now)
-- [ ] `tools/check_gitlinks.sh`, `python3 tools/check_readmes.py`, `python3 tools/check_community.py` and `python3 tools/check_ci_pins.py` pass
-- [ ] `python3 tools/list_loops.py --check`, `python3 tools/list_errors.py --check` and `python3 tools/list_lifetimes.py --check` pass
-- [ ] Update-feed, `boards.json` or UF2-check code changed: `node --test tools/*.test.mjs` passes
-- [ ] The firmware builds (`tools/dev_firmware.sh`, plus `--picow` if it touches the Pico W)
-- [ ] User-facing change: an entry under `[Unreleased]` in `CHANGELOG.md`; a README change is in all 7 languages
-- [ ] Protocol or `Config_body` change: `PICO_PROTO_*` bumped, a matching pull request in DS5Dongle-OLED-Config-Web, and `python3 tools/check_protocol_lockstep.py <app checkout>` passes
+涉及协议、配置迁移或音频时，请说明兼容性影响。保留来源与许可声明，不上传本机凭据和真实手柄 MAC。
 
-## Hardware tested on
-
-<!-- Board (Pico 2 W / Pico W), OLED fitted or not, controller (DualSense / Edge), and what you did and saw. -->
-
-## Systems tried
-
-<!-- Linux (distribution) / SteamOS / Windows / macOS, and the game or app if it matters. -->
-
-By opening this pull request you agree that your contribution is released under this repository's licence (MIT, LICENSE).
+提交贡献表示你同意按本仓库对应的许可提供该贡献，详见 LICENSE 与 THIRD_PARTY_NOTICES.md。

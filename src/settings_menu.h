@@ -21,6 +21,12 @@
 
 namespace settings_menu {
 
+#ifdef OLED_ZH
+#define OLED_LOC(en, zh) zh
+#else
+#define OLED_LOC(en, zh) en
+#endif
+
 // Each setting defines its display, storage and adjustment in one place.
 enum SetKind : uint8_t { SK_NUM, SK_BOOL, SK_POWER, SK_ACTION };
 enum SetFormat : uint8_t { SF_PLAIN, SF_OFF0, SF_GAME0, SF_PC0, SF_REDUCE };
@@ -34,65 +40,65 @@ struct SetItem {
     uint8_t flags, act, off; // Config_body offset, or the mask for SK_POWER
     int16_t lo, hi, step;
 };
-inline const char* const kOnOff[] = {"off", "on"};
-inline const char* const kDisabled[] = {"on", "off"};
-inline const char* const kPoll[] = {"250Hz", "500Hz", "RT", "1000Hz"};  // stored values: 3 = 1000 Hz (protocol 1.22)
-inline const char* const kCtrl[] = {"DS5", "DSE", "Auto"};
-inline const char* const kAutoHap[] = {"Off", "Fallback", "Mix", "Replace"};
+inline const char* const kOnOff[] = {OLED_LOC("off", "关"), OLED_LOC("on", "开")};
+inline const char* const kDisabled[] = {OLED_LOC("on", "开"), OLED_LOC("off", "关")};
+inline const char* const kPoll[] = {"250Hz", "500Hz", OLED_LOC("RT", "实时"), "1000Hz"};  // stored values: 3 = 1000 Hz (protocol 1.22)
+inline const char* const kCtrl[] = {"DS5", "DSE", OLED_LOC("Auto", "自动")};
+inline const char* const kAutoHap[] = {OLED_LOC("Off", "关"), OLED_LOC("Fallback", "后备"), OLED_LOC("Mix", "混合"), OLED_LOC("Replace", "替代")};
 inline const char* const kAHLp[] = {"80Hz", "160Hz", "250Hz", "400Hz"};
-inline const char* const kSpkOut[] = {"Auto", "SPK", "Hset", "off"};
-inline const char* const kMicIn[] = {"Auto", "Int", "Hset"};
-inline const char* const kPacket[] = {"double", "single"};  // 0x39 two frames, 0x36 one (protocol 1.22)
+inline const char* const kSpkOut[] = {OLED_LOC("Auto", "自动"), OLED_LOC("SPK", "扬声器"), OLED_LOC("Hset", "耳机"), OLED_LOC("off", "关")};
+inline const char* const kMicIn[] = {OLED_LOC("Auto", "自动"), OLED_LOC("Int", "内置"), OLED_LOC("Hset", "耳机")};
+inline const char* const kPacket[] = {OLED_LOC("double", "双包"), OLED_LOC("single", "单包")};  // 0x39 two frames, 0x36 one (protocol 1.22)
 #define CFG_OFF(field) static_cast<uint8_t>(offsetof(Config_body, field))
 // Group by group (kGroups), most used first in each.
 inline const SetItem kItems[] = {
     // Haptics/trigger
-    {"Vibration L", nullptr, nullptr, nullptr, SK_NUM, SF_PLAIN, SIF_FLOAT10, ACT_NONE, CFG_OFF(haptics_gain), 10, 60, 5},
-    {"Vibration R", nullptr, nullptr, nullptr, SK_NUM, SF_PLAIN, SIF_FLOAT10, ACT_NONE, CFG_OFF(haptics_gain_right), 10, 60, 5},
-    {"Trig. effect", nullptr, nullptr, nullptr, SK_NUM, SF_REDUCE, 0, ACT_NONE, CFG_OFF(trigger_reduce), 0, 10, 1},
-    {"AutoHap", nullptr, nullptr, kAutoHap, SK_NUM, SF_PLAIN, SIF_WRAP, ACT_NONE, CFG_OFF(auto_haptics_enable), 0, 3, 1},
-    {"AutoHap gain", "%", nullptr, nullptr, SK_NUM, SF_PLAIN, 0, ACT_NONE, CFG_OFF(auto_haptics_gain), 0, 200, 10},
-    {"Auto filter", nullptr, nullptr, kAHLp, SK_NUM, SF_PLAIN, SIF_WRAP, ACT_NONE, CFG_OFF(auto_haptics_lowpass), 0, 3, 1},
+    {OLED_LOC("Vibration L", "左握把振动"), nullptr, nullptr, nullptr, SK_NUM, SF_PLAIN, SIF_FLOAT10, ACT_NONE, CFG_OFF(haptics_gain), 0, 60, 5},
+    {OLED_LOC("Vibration R", "右握把振动"), nullptr, nullptr, nullptr, SK_NUM, SF_PLAIN, SIF_FLOAT10, ACT_NONE, CFG_OFF(haptics_gain_right), 0, 60, 5},
+    {OLED_LOC("Trig. effect", "扳机效果强度"), nullptr, nullptr, nullptr, SK_NUM, SF_REDUCE, 0, ACT_NONE, CFG_OFF(trigger_reduce), 0, 10, 1},
+    {OLED_LOC("AutoHap", "自动触觉反馈"), nullptr, nullptr, kAutoHap, SK_NUM, SF_PLAIN, SIF_WRAP, ACT_NONE, CFG_OFF(auto_haptics_enable), 0, 3, 1},
+    {OLED_LOC("AutoHap gain", "自动触觉强度"), "%", nullptr, nullptr, SK_NUM, SF_PLAIN, 0, ACT_NONE, CFG_OFF(auto_haptics_gain), 0, 200, 10},
+    {OLED_LOC("Auto filter", "触觉滤波"), nullptr, nullptr, kAHLp, SK_NUM, SF_PLAIN, SIF_WRAP, ACT_NONE, CFG_OFF(auto_haptics_lowpass), 0, 3, 1},
     // Audio
-    {"Spk volume", "dB", nullptr, nullptr, SK_NUM, SF_PLAIN, SIF_FLOAT | SIF_GRID, ACT_NONE, CFG_OFF(speaker_volume), -100, 12, 5},
-    {"Spk boost", nullptr, nullptr, nullptr, SK_NUM, SF_GAME0, 0, ACT_NONE, CFG_OFF(speaker_gain), 0, 7, 1},
-    {"Lock volume", nullptr, nullptr, nullptr, SK_BOOL, SF_PLAIN, 0, ACT_NONE, CFG_OFF(lock_volume), 0, 1, 1},
-    {"Audio out", nullptr, nullptr, kSpkOut, SK_NUM, SF_PLAIN, SIF_WRAP, ACT_NONE, CFG_OFF(speaker_select), 0, 3, 1},
-    {"Built-in mic", nullptr, nullptr, nullptr, SK_BOOL, SF_PLAIN, 0, ACT_NONE, CFG_OFF(bt_mic_enable), 0, 1, 1},
-    {"Mic used", nullptr, nullptr, kMicIn, SK_NUM, SF_PLAIN, SIF_WRAP, ACT_NONE, CFG_OFF(mic_select), 0, 2, 1},
-    {"Mic level", nullptr, nullptr, nullptr, SK_NUM, SF_PC0, 0, ACT_NONE, CFG_OFF(mic_level), 0, kMicLevelMax, 4},
-    {"Echo cancel", nullptr, nullptr, nullptr, SK_BOOL, SF_PLAIN, 0, ACT_NONE, CFG_OFF(mic_echo_cancel), 0, 1, 1},
-    {"Audio buffer", nullptr, nullptr, nullptr, SK_NUM, SF_PLAIN, 0, ACT_NONE, CFG_OFF(audio_buffer_length), kAudioBufferMin, kAudioBufferMax, 4},
-    {"Audio pkt", nullptr, nullptr, kPacket, SK_NUM, SF_PLAIN, SIF_WRAP, ACT_NONE, CFG_OFF(packet_mode), 0, 1, 1},
+    {OLED_LOC("Spk volume", "扬声器音量"), "dB", nullptr, nullptr, SK_NUM, SF_PLAIN, SIF_FLOAT | SIF_GRID, ACT_NONE, CFG_OFF(speaker_volume), -100, 12, 5},
+    {OLED_LOC("Spk boost", "扬声器增益"), nullptr, nullptr, nullptr, SK_NUM, SF_GAME0, 0, ACT_NONE, CFG_OFF(speaker_gain), 0, 7, 1},
+    {OLED_LOC("Lock volume", "锁定音量"), nullptr, nullptr, nullptr, SK_BOOL, SF_PLAIN, 0, ACT_NONE, CFG_OFF(lock_volume), 0, 1, 1},
+    {OLED_LOC("Audio out", "音频输出"), nullptr, nullptr, kSpkOut, SK_NUM, SF_PLAIN, SIF_WRAP, ACT_NONE, CFG_OFF(speaker_select), 0, 3, 1},
+    {OLED_LOC("Built-in mic", "内置麦克风"), nullptr, nullptr, nullptr, SK_BOOL, SF_PLAIN, 0, ACT_NONE, CFG_OFF(bt_mic_enable), 0, 1, 1},
+    {OLED_LOC("Mic used", "麦克风来源"), nullptr, nullptr, kMicIn, SK_NUM, SF_PLAIN, SIF_WRAP, ACT_NONE, CFG_OFF(mic_select), 0, 2, 1},
+    {OLED_LOC("Mic level", "麦克风电平"), nullptr, nullptr, nullptr, SK_NUM, SF_PC0, 0, ACT_NONE, CFG_OFF(mic_level), 0, kMicLevelMax, 4},
+    {OLED_LOC("Echo cancel", "回声消除"), nullptr, nullptr, nullptr, SK_BOOL, SF_PLAIN, 0, ACT_NONE, CFG_OFF(mic_echo_cancel), 0, 1, 1},
+    {OLED_LOC("Audio buffer", "音频缓冲"), nullptr, nullptr, nullptr, SK_NUM, SF_PLAIN, 0, ACT_NONE, CFG_OFF(audio_buffer_length), kAudioBufferMin, kAudioBufferMax, 4},
+    {OLED_LOC("Audio pkt", "音频包模式"), nullptr, nullptr, kPacket, SK_NUM, SF_PLAIN, SIF_WRAP, ACT_NONE, CFG_OFF(packet_mode), 0, 1, 1},
     // Connection
-    {"Controller", nullptr, nullptr, kCtrl, SK_NUM, SF_PLAIN, SIF_WRAP, ACT_NONE, CFG_OFF(controller_mode), 0, 2, 1},
-    {"Poll rate", nullptr, nullptr, kPoll, SK_NUM, SF_PLAIN, SIF_WRAP, ACT_NONE, CFG_OFF(polling_rate_mode), 0, 3, 1},
-    {"Disconnect", nullptr, nullptr, kDisabled, SK_BOOL, SF_PLAIN, 0, ACT_NONE, CFG_OFF(disable_inactive_disconnect), 0, 1, 1},
-    {"Idle time", "min", nullptr, nullptr, SK_NUM, SF_PLAIN, 0, ACT_NONE, CFG_OFF(inactive_time), 10, 60, 5},
-    {"Drop on dock", nullptr, nullptr, nullptr, SK_BOOL, SF_PLAIN, 0, ACT_NONE, CFG_OFF(disconnect_on_dock), 0, 1, 1},
+    {OLED_LOC("Controller", "手柄类型"), nullptr, nullptr, kCtrl, SK_NUM, SF_PLAIN, SIF_WRAP, ACT_NONE, CFG_OFF(controller_mode), 0, 2, 1},
+    {OLED_LOC("Poll rate", "回报率"), nullptr, nullptr, kPoll, SK_NUM, SF_PLAIN, SIF_WRAP, ACT_NONE, CFG_OFF(polling_rate_mode), 0, 3, 1},
+    {OLED_LOC("Disconnect", "闲置自动断开"), nullptr, nullptr, kDisabled, SK_BOOL, SF_PLAIN, 0, ACT_NONE, CFG_OFF(disable_inactive_disconnect), 0, 1, 1},
+    {OLED_LOC("Idle time", "闲置时间"), OLED_LOC("min", "分"), nullptr, nullptr, SK_NUM, SF_PLAIN, 0, ACT_NONE, CFG_OFF(inactive_time), 10, 60, 5},
+    {OLED_LOC("Drop on dock", "放回底座断开"), nullptr, nullptr, nullptr, SK_BOOL, SF_PLAIN, 0, ACT_NONE, CFG_OFF(disconnect_on_dock), 0, 1, 1},
     // Screen & lights
-    {"Screen dim", "min", nullptr, nullptr, SK_NUM, SF_OFF0, 0, ACT_NONE, CFG_OFF(screen_dim_timeout), 0, 250, 1},
-    {"Screen off", "min", nullptr, nullptr, SK_NUM, SF_OFF0, 0, ACT_NONE, CFG_OFF(screen_off_timeout), 0, 250, 1},
-    {"Wake on input", nullptr, nullptr, nullptr, SK_BOOL, SF_PLAIN, 0, ACT_NONE, CFG_OFF(controller_wakes_display), 0, 1, 1},
-    {"Status LED", nullptr, nullptr, kDisabled, SK_BOOL, SF_PLAIN, 0, ACT_NONE, CFG_OFF(disable_pico_led), 0, 1, 1},
+    {OLED_LOC("Screen dim", "变暗时间"), OLED_LOC("min", "分"), nullptr, nullptr, SK_NUM, SF_OFF0, 0, ACT_NONE, CFG_OFF(screen_dim_timeout), 0, 250, 1},
+    {OLED_LOC("Screen off", "熄屏时间"), OLED_LOC("min", "分"), nullptr, nullptr, SK_NUM, SF_OFF0, 0, ACT_NONE, CFG_OFF(screen_off_timeout), 0, 250, 1},
+    {OLED_LOC("Wake on input", "操作唤醒"), nullptr, nullptr, nullptr, SK_BOOL, SF_PLAIN, 0, ACT_NONE, CFG_OFF(controller_wakes_display), 0, 1, 1},
+    {OLED_LOC("Status LED", "状态灯"), nullptr, nullptr, kDisabled, SK_BOOL, SF_PLAIN, 0, ACT_NONE, CFG_OFF(disable_pico_led), 0, 1, 1},
     // PC sleep
-    {"Turn off ctrl", nullptr, nullptr, nullptr, SK_POWER, SF_PLAIN, 0, ACT_NONE, POWER_SLEEP_CONTROLLER_OFF, 0, 1, 1},
-    {"PS wakes PC", nullptr, nullptr, nullptr, SK_POWER, SF_PLAIN, 0, ACT_NONE, POWER_PS_WAKES_PC, 0, 1, 1},
+    {OLED_LOC("Turn off ctrl", "休眠关手柄"), nullptr, nullptr, nullptr, SK_POWER, SF_PLAIN, 0, ACT_NONE, POWER_SLEEP_CONTROLLER_OFF, 0, 1, 1},
+    {OLED_LOC("PS wakes PC", "PS 唤醒电脑"), nullptr, nullptr, nullptr, SK_POWER, SF_PLAIN, 0, ACT_NONE, POWER_PS_WAKES_PC, 0, 1, 1},
     // Reset
-    {"Reset to defaults", nullptr, "Hold Tri 2s = RESET", nullptr, SK_ACTION, SF_PLAIN, 0, ACT_RESET, 0, 0, 0, 1},
-    {"Wipe all slots", nullptr, "Hold Tri 2s = WIPE", nullptr, SK_ACTION, SF_PLAIN, 0, ACT_WIPE, 0, 0, 0, 1},
+    {OLED_LOC("Reset to defaults", "恢复默认"), nullptr, OLED_LOC("Hold Tri 2s = RESET", "长按△两秒恢复"), nullptr, SK_ACTION, SF_PLAIN, 0, ACT_RESET, 0, 0, 0, 1},
+    {OLED_LOC("Wipe all slots", "清空配对槽"), nullptr, OLED_LOC("Hold Tri 2s = WIPE", "长按△两秒清空"), nullptr, SK_ACTION, SF_PLAIN, 0, ACT_WIPE, 0, 0, 0, 1},
 };
 #undef CFG_OFF
 constexpr int kNumItems = sizeof(kItems) / sizeof(kItems[0]);
 
 struct Group { const char *name; uint8_t first, count; };
 inline constexpr Group kGroups[] = {
-    {"Haptics/trigger", 0, 6},
-    {"Audio", 6, 10},
-    {"Connection", 16, 5},
-    {"Screen & lights", 21, 4},
-    {"PC sleep", 25, 2},
-    {"Reset", 27, 2},
+    {OLED_LOC("Haptics/trigger", "触觉与扳机"), 0, 6},
+    {OLED_LOC("Audio", "音频"), 6, 10},
+    {OLED_LOC("Connection", "连接"), 16, 5},
+    {OLED_LOC("Screen & lights", "屏幕与灯光"), 21, 4},
+    {OLED_LOC("PC sleep", "电脑休眠"), 25, 2},
+    {OLED_LOC("Reset", "重置"), 27, 2},
 };
 constexpr int kNumGroups = sizeof(kGroups) / sizeof(kGroups[0]);
 constexpr bool groups_tile_items() {
@@ -119,8 +125,8 @@ constexpr int kScrollX = 125, kScrollW = 3, kScrollY = kRowY0, kScrollH = kVisib
 static_assert(kBarX + kBarW < kScrollX, "the bar stops short of the scroll bar");
 static_assert(kRowY0 + (kVisible - 1) * kRowH + kRowH - 1 < kFooterY - 2, "the rows stay out of the footer band");
 
-constexpr const char *kMenuFooter = "X=open  Tri=save";
-constexpr const char *kPageFooter = "O=back  Tri=save";
+constexpr const char *kMenuFooter = OLED_LOC("X=open  Tri=save", "✖打开 △保存");
+constexpr const char *kPageFooter = OLED_LOC("O=back  Tri=save", "○返回 △保存");
 
 // The value text of item `it` ("1.0x", "-20dB", "off"…); "" for an action.
 __attribute__((noinline)) inline void format_value(const SetItem &it, const Config_body &local, uint8_t power,
@@ -131,7 +137,8 @@ __attribute__((noinline)) inline void format_value(const SetItem &it, const Conf
     if (it.flags & SIF_FLOAT10) {
         float f; memcpy(&f, p, sizeof(f));
         const int g = static_cast<int>(f * 10.0f + 0.5f);
-        snprintf(value, n, "%d.%dx", g / 10, g % 10);
+        if (g == 0) snprintf(value, n, "%s", OLED_LOC("off", "关"));
+        else snprintf(value, n, OLED_LOC("%d.%dx", "%d.%d×"), g / 10, g % 10);
     } else if (it.flags & SIF_FLOAT) {
         float f; memcpy(&f, p, sizeof(f));
         snprintf(value, n, "%+d%s", static_cast<int>(f), it.unit ? it.unit : "");
@@ -142,7 +149,7 @@ __attribute__((noinline)) inline void format_value(const SetItem &it, const Conf
             const unsigned index = it.kind == SK_BOOL || it.kind == SK_POWER ? v != 0 : v % (it.hi + 1);
             snprintf(value, n, "%s", names[index]);
         } else if (v == 0 && it.fmt != SF_PLAIN) {
-            snprintf(value, n, "%s", it.fmt == SF_OFF0 ? "off" : it.fmt == SF_PC0 ? "PC" : "game");
+            snprintf(value, n, "%s", it.fmt == SF_OFF0 ? OLED_LOC("off", "关") : it.fmt == SF_PC0 ? OLED_LOC("PC", "电脑") : OLED_LOC("game", "游戏"));
         } else {
             snprintf(value, n, "%s%u%s", it.fmt == SF_REDUCE ? "-" : "", v, it.unit ? it.unit : "");
         }
@@ -231,6 +238,7 @@ struct Nav {
     uint8_t last_dpad = 8, last_face = 0;
     uint32_t tri_press_us = 0;
     bool hold_fired = false;
+    bool tri_cancelled = false;
 
     int item() const { return kGroups[group].first + row; }
     int rows() const { return in_group ? kGroups[group].count : kNumGroups; }
@@ -240,6 +248,8 @@ struct Nav {
 
     Step step(uint8_t dpad, uint8_t face, uint32_t now_us) {
         Step out{0, kNone};
+        const bool was_in_group = in_group;
+        const uint8_t was_group = group, was_row = row;
         if (dpad != last_dpad && dpad != 8) {
             const int n = rows();
             uint8_t &cur = in_group ? row : group;
@@ -261,15 +271,20 @@ struct Nav {
         if (tri_now && !tri_prev) {
             tri_press_us = now_us;
             hold_fired = false;
+            tri_cancelled = false;
         }
+        // A press is bound to one navigation target. Moving while Triangle is
+        // held requires a release and fresh press, including a same-tick move.
+        if ((tri_now || tri_prev) && (was_in_group != in_group || was_group != group || was_row != row))
+            tri_cancelled = true;
         // error: NOT-WORTH — not a failure: whether this row takes a hold instead of a press
         const bool hold = hold_row();
-        if (hold && tri_now && !hold_fired && now_us - tri_press_us >= kHoldUs) {
+        if (hold && tri_now && !tri_cancelled && !hold_fired && now_us - tri_press_us >= kHoldUs) {
             hold_fired = true;
             out.action = kItems[item()].act == ACT_RESET ? kReset : kWipe;
         }
         if (!tri_now && tri_prev) {
-            if (!hold && !hold_fired) out.action = kSave;
+            if (!hold && !tri_cancelled && !hold_fired) out.action = kSave;
             hold_fired = false;
         }
         last_face = face;
@@ -297,11 +312,12 @@ struct View {
     uint8_t saved_power;
     bool dirty;
     const char *status;        // "Saved!" etc. while it shows, else nullptr
+    bool ds4 = false;
 };
 
 // The title text: the menu's or the open group's name, (*) while unsaved.
 inline void title_text(const Nav &nav, bool dirty, char *out, size_t n) {
-    snprintf(out, n, "%s%s", nav.in_group ? kGroups[nav.group].name : "Settings", dirty ? " (*)" : "");
+    snprintf(out, n, "%s%s", nav.in_group ? kGroups[nav.group].name : OLED_LOC("Settings", "设置"), dirty ? " (*)" : "");
 }
 
 inline const char *footer_text(const Nav &nav, const char *status) {
@@ -309,6 +325,11 @@ inline const char *footer_text(const Nav &nav, const char *status) {
     if (!nav.in_group) return kMenuFooter;
     const char *hint = kItems[nav.item()].hint;
     return hint ? hint : kPageFooter;
+}
+
+inline bool ds4_item_supported(int item) {
+    // Only controls with a DS4 backend. Boost/lock/mic/buffer/packet are DS5-only.
+    return item < 2 || item == 6 || item == 9 || (item >= 17 && item <= 19) || item >= 21;
 }
 
 // Row `idx` of the current page: its label and value ("" for none).
@@ -320,6 +341,9 @@ inline void row_text(const Nav &nav, int idx, const View &v, const char *&label,
     }
     const SetItem &it = kItems[kGroups[nav.group].first + idx];
     label = it.label;
+    if (v.ds4 && !ds4_item_supported(kGroups[nav.group].first + idx)) {
+        snprintf(value, n, "--"); return;
+    }
     format_value(it, v.local, v.power, value, n);
 }
 
@@ -327,6 +351,49 @@ inline void row_text(const Nav &nav, int idx, const View &v, const char *&label,
 // (oled.cpp's FbCanvas, or the host's BitCanvas). The caller clears first.
 template <AdjStyle S = kNotch, typename C>
 void draw(C &c, const Nav &nav, const View &v) {
+#ifdef OLED_ZH
+    constexpr int cell = OLED_SETTINGS_ROW_HEIGHT;
+    static_assert(cell == 14 || cell == 16, "OLED_SETTINGS_ROW_HEIGHT must be 14 or 16");
+    constexpr int font_offset = cell == 14 ? -2 : 0;
+    char buf[32];
+    title_text(nav, v.dirty, buf, sizeof(buf));
+    c.zh_text(7, font_offset, buf, 7, 0, 124, cell);
+    // The 14px layout uses two rows and a 12px controls hint. A 16px page
+    // keeps three rows until a status or hold hint needs the bottom band.
+    const bool footer = cell == 14 || v.status || nav.hold_row();
+    const int visible = cell == 14 ? 2 : footer ? 2 : 3;
+    const int n = nav.rows(), sel = nav.sel();
+    const int top = sel >= visible ? sel - visible + 1 : 0;
+    // loop: HOT-PATH-OK — at most 3 Chinese rows, Settings screen at 10 Hz
+    for (int i = 0; i < visible && top + i < n; ++i) {
+        const int idx = top + i, y = (i + 1) * cell;
+        const char *label;
+        char value[20];
+        row_text(nav, idx, v, label, value, sizeof(value));
+        const int vx = 120 - c.zh_width(value);
+        c.zh_text(9, y + font_offset, label, 9, y, value[0] ? vx - 3 : 124, y + cell);
+        if (value[0]) c.zh_text(vx, y + font_offset, value, vx, y, 124, y + cell);
+        if (idx == sel) {
+            c.invert(7, y, 117, cell);
+            if (nav.in_group && value[0] &&
+                changed(kItems[nav.item()], v.local, v.power, v.saved, v.saved_power)) {
+                // Lit text on dark for an unsaved value; retain the 2px cap.
+                c.invert(vx - 2, y, 122 - (vx - 2), cell);
+            }
+        }
+    }
+    if (n > visible) {
+        const int h = visible * cell - 1;
+        int thumb = h * visible / n;
+        if (thumb < 4) thumb = 4;
+        const int ty = cell + (h - thumb) * top / (n - visible);
+        c.filled(125, ty, 2, thumb);
+    }
+    if (footer) {
+        constexpr int fy = cell == 14 ? 50 : 48;
+        c.zh_text(7, fy + font_offset, footer_text(nav, v.status), 7, fy, 124, 64);
+    }
+#else
     char buf[24];
     title_text(nav, v.dirty, buf, sizeof(buf));
     c.text(kX, kTitleY, buf);
@@ -369,6 +436,8 @@ void draw(C &c, const Nav &nav, const View &v) {
     }
 
     c.text(kX, kFooterY, footer_text(nav, v.status));
+#endif
 }
 
+#undef OLED_LOC
 }  // namespace settings_menu

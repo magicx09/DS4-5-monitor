@@ -17,7 +17,7 @@ constexpr uint8_t kAudioBufferMax = 128;
 
 struct __attribute__((packed)) Config_body {
     uint8_t config_version; // Config Version
-    float haptics_gain; // [1.0,6.0] left grip (and both while the app links them)
+    float haptics_gain; // [0,6.0] left grip; 0 disables vibration on this grip
     float speaker_volume; // [-100,+12] dB digital gain on the speaker PCM; >0 boosts (hard-clipped at full scale)
     uint8_t inactive_time; // [5,60] min
     uint8_t disable_inactive_disconnect; // bool: 0 disable,1 enable
@@ -162,6 +162,9 @@ struct __attribute__((packed)) Config {
     // start. Not in the CRC; 0xFF from older firmware reads as the
     // Pico-OLED-1.3, which every earlier image drove.
     uint8_t display_id;
+    // 180-degree OLED orientation, saved like display_id and outside the body
+    // CRC. 0xFF from older firmware reads as 0 (normal).
+    uint8_t screen_flipped;
 };
 
 void config_default();
@@ -169,6 +172,11 @@ void config_default();
 // is on it): the app's factory reset (0xF6 0x09) and the OLED's Reset to defaults.
 void config_default_keep_slot(uint8_t slot);
 void config_load();
+// Call after slots_load(): migrate global controller preferences into the four
+// slots, then select the active profile. Board/display settings remain shared.
+bool config_profiles_init();
+void config_profiles_slot_changed(int slot);
+uint32_t config_profile_generation(); // OLED cache invalidation on owner/slot change
 bool config_save();
 bool config_unsaved();  // RAM settings differ from flash
 // Set the narrator byte in RAM and in flash, leaving every other saved
@@ -188,6 +196,10 @@ uint8_t config_display_id();
 // Save a display choice on its own, like config_save_power_flags. False = not
 // a display this image drives, or the flash write failed.
 bool config_save_display_id(uint8_t id);
+// The persisted 180-degree OLED orientation.
+bool config_screen_flipped();
+// Save the orientation on its own; other unsaved edits stay unsaved.
+bool config_save_screen_flipped(bool flipped);
 const Config_body& get_config();
 void set_config(const uint8_t *new_config, const uint16_t len);
 void config_valid();

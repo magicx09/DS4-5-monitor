@@ -1,0 +1,43 @@
+{
+  "platform": "Windows x86_64",
+  "arm_toolchain": {
+    "version": "15.2.Rel1",
+    "directory": "deps",
+    "url": "https://developer.arm.com/-/media/Files/downloads/gnu/15.2.rel1/binrel/arm-gnu-toolchain-15.2.rel1-mingw-w64-x86_64-arm-none-eabi.zip",
+    "sha256": "7936cac895611023ffb22a64b8e426098c7104cb689778c1894572ca840b9ece",
+    "checksum_verified_against_arm_sha256asc": true
+  },
+  "host_compiler": {
+    "version": "LLVM-MinGW 20261104 / Clang 23.1.5",
+    "directory": "deps/llvm-mingw-20261104-ucrt-x86_64",
+    "url": "https://github.com/mstorsjo/llvm-mingw/releases/download/20261104/llvm-mingw-20261104-ucrt-x86_64.zip",
+    "download_sha256": "552191b5754c49a5a20723276a6fc56541ea1922c4c50b7b669022333fc1b40f"
+  },
+  "git_dependencies": {
+    "deps/pico-sdk": "079c6f39023649b154152db30f1d781e884879bc",
+    "deps/pico-sdk/lib/tinyusb": "98741b55959564746998d0453c32d87064629d7c",
+    "deps/pico-sdk/lib/btstack": "eb0bb8b5ea6d234ccb940313b47f7a5c3b4e20ec",
+    "deps/pico-sdk/lib/cyw43-driver": "055d64274b014dd7b1c2fc94d26e8a18face7124",
+    "deps/pico-sdk/lib/lwip": "77dcd25a72509eb83f72b033d219b1d40cd8eb95",
+    "deps/pico-sdk/lib/mbedtls": "0bebf8b8c7f07abe3571ded48a11aa907a1ffb20",
+    "repo/lib/WDL": "afc0f78dca4a1743a948839ac75f4d7059d739c3",
+    "repo/lib/opus": "2d862ea14b233e5a3f3afaf74d96050691af3cd5"
+  },
+  "picotool": {
+    "commit": "2041936441b48a3cc53ae3da9e805229fe8f4e18",
+    "directory": "deps/host-tools/picotool",
+    "usb_flashing_support": false
+  },
+  "pioasm": {
+    "source": "Pico SDK 2.3.1",
+    "directory": "deps/host-tools/pioasm"
+  },
+  "existing_machine_tools": {
+    "cmake": "4.3.1-msvc1",
+    "ninja": "1.13.2",
+    "python": "3.14.7",
+    "git": "2.55.0.windows.3"
+  },
+  "original_base_commit_unavailable": "4dd8b78e9e4ef58ab6772749335b51c6376d244d",
+  "recovered_git_base": "08536e0731cc2b529de8e56b94c00146e193321c"
+}

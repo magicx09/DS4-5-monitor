@@ -9,6 +9,19 @@
 
 void audio_init();
 void audio_loop();
+void ds4_audio_init();
+void ds4_audio_loop();
+void ds4_audio_core1_start();
+void ds4_audio_core1_step();
+void ds4_audio_reset(); // core0: new link/USB stream; reject stale queued generations
+void ds4_audio_controls(bool force = false);
+struct Ds4AudioDiag {
+    uint32_t usb_frames, nonzero_frames, pcm_blocks, encoded, encode_errors;
+    uint32_t queued, queue_errors, pcm_drops, sbc_drops, control_queued;
+    uint16_t input_peak, output_peak;
+    uint8_t encoder_state, target, amp; // encoder: 0 starting, 1 ready, 2 failed
+};
+Ds4AudioDiag ds4_audio_diagnostics();
 void core1_entry();
 void set_headset(bool state);
 

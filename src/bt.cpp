@@ -5,6 +5,8 @@
 #include <cstdio>
 #include <cstring>
 #include "bt.h"
+#include "ds4_protocol.h"
+#include "ds4_discovery.h"
 #include "rssi_poll.h"
 #include "ctrl_send.h"
 #include "core0_ram.h"
@@ -79,6 +81,21 @@ static const uint8_t kNeutralInput[66] = {
     0x53, 0x9f, 0x28, 0x35, 0xa5, 0xa8, 0x0c, 0x8b
 };
 static bool check_dse = false;
+bool g_bt_ds4 = false;
+static bool ds4_ready = false;
+static const char *pair_stage = "Pair: scan";
+static char pair_error_text[21]{};
+static void pair_progress(const char *stage) {
+    if (ENABLE_DS4) pair_stage = stage;
+}
+static void pair_error(const char *stage, uint8_t code) {
+    if (!ENABLE_DS4) return;
+    snprintf(pair_error_text, sizeof(pair_error_text), "%s E:%02X", stage, code);
+    pair_stage = pair_error_text;
+}
+const char *bt_pair_diagnostic() {
+    return ENABLE_DS4 ? pair_stage : nullptr;
+}
 // lifetime: OK — cleared on disconnect (feature_data.clear()); ≤ ~10 report ids × ≤ 64 B meanwhile
 unordered_map<uint8_t, vector<uint8_t> > feature_data;
 queue_t send_fifo;
@@ -164,6 +181,7 @@ static void inquiry_continue() {
 // A pairing action (slot switch, forget, wipe): open the window and scan now
 // if no controller is connected (else the disconnect that follows starts it).
 static void pairing_window_open() {
+    pair_progress("Pair: scan");
     g_scan.open(time_us_64());
     if (acl_handle == HCI_CON_HANDLE_INVALID && !device_found) inquiry_start();
 }
@@ -172,6 +190,8 @@ static void pairing_window_open() {
 // accepts them, and our HCI_EVENT_CONNECTION_REQUEST watchdog): a slot's
 // controller, or anything while a pairing window is open (src/bt_policy.h).
 static bool incoming_allowed(bd_addr_t addr) {
+    // One physical controller at a time; never let a second ACL change the backend.
+    if (ENABLE_DS4 && acl_handle != HCI_CON_HANDLE_INVALID) return false;
     // error: NOT-WORTH — a yes/no decision, not a failure; a refusal is printed by the caller
     return btpolicy::accept_incoming(slot_owner_of(addr), g_scan.open_now(time_us_64()));
 }
@@ -243,6 +263,9 @@ static void hci_error_seen() {
 }
 
 static volatile uint32_t g_bt_send_drops = 0;
+static uint32_t ds4_audio_sent_count = 0, ds4_audio_error_count = 0;
+uint32_t bt_ds4_audio_sent() { return ds4_audio_sent_count; }
+uint32_t bt_ds4_audio_errors() { return ds4_audio_error_count; }
 uint32_t bt_send_drops() { return g_bt_send_drops; }
 bool bt_send_full() { return queue_is_full(&send_fifo); }
 
@@ -416,6 +439,11 @@ void bt_connection_watchdog_tick() {
             < CONNECT_WATCHDOG_TIMEOUT_US) {
         return;
     }
+    if (ENABLE_DS4 && pair_stage != pair_error_text) {
+        const char *where = acl_handle == HCI_CON_HANDLE_INVALID ? "ACL timeout" :
+            hid_interrupt_cid ? "FEAT timeout" : "HID timeout";
+        pair_error(where, 0xff);
+    }
     printf("[BT] Connection watchdog: attempt stalled, recovering\n");
     connect_attempt_started = 0; // disarm; the next attempt re-arms
 
@@ -478,6 +506,7 @@ int bt_init() {
     // Load persistent slot table BEFORE HCI comes up so the inquiry filter
     // and discoverable-gating see the right state on the first event.
     slots_load();
+    if (!config_profiles_init()) oled_notice(oled_toast::kSlot);
     g_current_slot = get_config().current_slot;
     if (g_current_slot < 0 || g_current_slot >= kNumSlots) g_current_slot = 0;
     printf("[BT] Boot slot = %d\n", g_current_slot);
@@ -556,18 +585,22 @@ static void CORE0_RAM_FUNC(hci_packet_handler)(uint8_t packet_type, uint16_t cha
         // name from the EIR when it has one (the raw HCI events still arrive
         // too; only this one carries the name).
         case GAP_EVENT_INQUIRY_RESULT: {
+            if (hid_interrupt_cid != 0 || (ENABLE_DS4 && (device_found || connect_attempt_started != 0))) break;
             bd_addr_t addr;
             gap_event_inquiry_result_get_bd_addr(packet, addr);
             const uint32_t cod = gap_event_inquiry_result_get_class_of_device(packet);
             const uint8_t *name = gap_event_inquiry_result_get_name_available(packet) ? gap_event_inquiry_result_get_name(packet) : nullptr;
             const uint8_t name_len = name ? gap_event_inquiry_result_get_name_len(packet) : 0;
 
-            // CoD 0x002508 = Gamepad (Major: Peripheral, Minor: Gamepad)
-            // Only a DualSense (or an Edge) by its name, upstream 83fcb19: a
-            // PS4 controller or another gamepad in pairing mode is left alone.
-            // error: LOGGED-OK — printf; a gamepad that isn't a DualSense is skipped on purpose (not ours to take)
-            if ((cod & 0x000F00) == 0x000500 && !btpolicy::inquiry_name_is_dualsense(name, name_len)) {
-                printf("[HCI] Gamepad %s skipped: name \"%.*s\" isn't a DualSense\n", bd_addr_to_str(addr), (int) name_len,
+            const bool have_id = gap_event_inquiry_result_get_device_id_available(packet);
+            const auto candidate = ds4::discover(cod, name, name_len, ENABLE_DS4, have_id,
+                have_id ? gap_event_inquiry_result_get_device_id_vendor_id_source(packet) : 0,
+                have_id ? gap_event_inquiry_result_get_device_id_vendor_id(packet) : 0,
+                have_id ? gap_event_inquiry_result_get_device_id_product_id(packet) : 0);
+            // A nameless gamepad is only a probe candidate. Feature validation
+            // remains required before assigning a new DS4 slot or attaching USB.
+            if (candidate == ds4::Candidate::Reject) {
+                printf("[HCI] Gamepad %s skipped: name \"%.*s\" is not supported\n", bd_addr_to_str(addr), (int) name_len,
                        name ? reinterpret_cast<const char *>(name) : "");
                 break;
             }
@@ -586,11 +619,17 @@ static void CORE0_RAM_FUNC(hci_packet_handler)(uint8_t packet_type, uint16_t cha
                            bd_addr_to_str(addr), owner, g_current_slot, occupied ? ", holds another" : "");
                     // Another slot's controller: say which, or the pairing
                     // countdown just runs out with no word why (re-review B-N3).
-                    if (owner >= 0 && owner < kNumSlots && owner != g_current_slot)
+                    if (owner >= 0 && owner < kNumSlots && owner != g_current_slot) {
                         oled_notice(oled_toast::kPairedInSlot[owner]);
+                        pair_progress(oled_toast::kPairedInSlot[owner]);
+                    } else pair_progress("Pair: slot occupied");
                     break;
                 }
-                printf("[HCI] DualSense found: %s (CoD: 0x%06x)\n", bd_addr_to_str(addr), (unsigned int) cod);
+                g_bt_ds4 = candidate == ds4::Candidate::Ds4 || candidate == ds4::Candidate::ProbeDs4;
+                pair_progress(candidate == ds4::Candidate::ProbeDs4 ? "Pair: DS4 probe" :
+                              g_bt_ds4 ? "Pair: DS4 found" : "Pair: DS5 found");
+                ds4_ready = false;
+                printf("[HCI] Supported controller found: %s (CoD: 0x%06x)\n", bd_addr_to_str(addr), (unsigned int) cod);
                 bd_addr_copy(current_device_addr, addr);
                 device_found = true;
                 // error: NOT-WORTH — nothing; gap_inquiry_* only fails while an inquiry is already in the wanted state or the stack is off, and INQUIRY_COMPLETE / the watchdog restart it
@@ -609,6 +648,7 @@ static void CORE0_RAM_FUNC(hci_packet_handler)(uint8_t packet_type, uint16_t cha
             if (btpolicy::inquiry_end_connects(device_found, connect_attempt_started != 0)) {
                 printf("[HCI] Connecting to %s...\n", bd_addr_to_str(current_device_addr));
                 new_pair = true;
+                pair_progress("Pair: ACL wait");
                 connect_attempt_started = get_absolute_time(); // arm connection watchdog
                 // error: LOGGED-OK — printf of the step + BTstack's own event; the connection watchdog (CONNECT_WATCHDOG_TIMEOUT_US) tears a stalled attempt down and inquiry restarts, the OLED shows not connected
                 hci_send_cmd(&hci_create_connection, current_device_addr,
@@ -634,6 +674,7 @@ static void CORE0_RAM_FUNC(hci_packet_handler)(uint8_t packet_type, uint16_t cha
                 device_found = false;
                 new_pair = false;
                 connect_attempt_started = 0; // disarm; failed before an ACL existed
+                pair_error("ACL command", status);
                 printf("[HCI] Create connection rejected\n");
                 inquiry_continue();
             }
@@ -664,6 +705,7 @@ static void CORE0_RAM_FUNC(hci_packet_handler)(uint8_t packet_type, uint16_t cha
                 acl_handle = handle;
                 rssi_reading.reset();  // no reading for the new link yet
                 hci_event_connection_complete_get_bd_addr(packet, current_device_addr);
+                pair_progress("Pair: AUTH wait");
                 printf("[HCI] ACL connected handle=0x%04X\n", handle);
                 printf("[HCI] Request authentication on handle=0x%04X\n", handle);
                 // error: LOGGED-OK — printf of the step + BTstack's own event; the connection watchdog (CONNECT_WATCHDOG_TIMEOUT_US) tears a stalled attempt down and inquiry restarts, the OLED shows not connected
@@ -672,6 +714,7 @@ static void CORE0_RAM_FUNC(hci_packet_handler)(uint8_t packet_type, uint16_t cha
                 device_found = false;
                 new_pair = false;
                 connect_attempt_started = 0; // disarm; no ACL was established
+                pair_error("ACL failed", status);
                 printf("[HCI] ACL connect failed status=0x%02X\n", status);
                 hci_error_seen();
                 inquiry_continue();
@@ -685,12 +728,6 @@ static void CORE0_RAM_FUNC(hci_packet_handler)(uint8_t packet_type, uint16_t cha
             link_key_t link_key;
             link_key_type_t link_key_type;
             bool link = gap_get_link_key_for_bd_addr(addr, link_key, &link_key_type);
-            printf("[HCI] Link key: ");
-            // loop: NOT-WORTH — printf of the 16-byte key, on a link key request only
-            for (int i = 0; i < sizeof(link_key_t); i++) {
-                printf("%02X", link_key[i]);
-            }
-            printf("\n");
             if (link) {
                 printf("[HCI] Link key request from %s, reply stored key type=%u\n", bd_addr_to_str(addr),
                        (unsigned int) link_key_type);
@@ -728,6 +765,7 @@ static void CORE0_RAM_FUNC(hci_packet_handler)(uint8_t packet_type, uint16_t cha
             printf("[HCI] Authentication complete handle=0x%04X status=0x%02X\n", handle, status);
             if (status != ERROR_CODE_SUCCESS) {
                 hci_error_seen();
+                pair_error("AUTH failed", status);
                 connect_attempt_started = 0; // disarm; teardown below re-inquires
                 // Only a rejected or missing key means the pairing is gone. Any
                 // other failure (a timeout, the link dropping mid-way) keeps the
@@ -762,6 +800,7 @@ static void CORE0_RAM_FUNC(hci_packet_handler)(uint8_t packet_type, uint16_t cha
             const uint8_t enabled = hci_event_encryption_change_get_encryption_enabled(packet);
             printf("[HCI] Encryption change handle=0x%04X status=0x%02X enabled=%u\n", handle, status, enabled);
             if (status == ERROR_CODE_SUCCESS && enabled) {
+                pair_progress("Pair: HID wait");
                 printf("[L2CAP] Open HID channels\n");
                 // A fresh pair opens control here and interrupt as soon as
                 // control is open (below): waiting for a second encryption
@@ -792,6 +831,8 @@ static void CORE0_RAM_FUNC(hci_packet_handler)(uint8_t packet_type, uint16_t cha
             connect_attempt_started = get_absolute_time(); // arm watchdog (incoming path)
             if ((cod & 0x000F00) == 0x000500) {
                 bd_addr_copy(current_device_addr, addr);
+                g_bt_ds4 = ENABLE_DS4 && slot_is_ds4(slot_owner_of(addr));
+                ds4_ready = false;
                 // error: NOT-WORTH — nothing; gap_inquiry_* only fails while an inquiry is already in the wanted state or the stack is off, and INQUIRY_COMPLETE / the watchdog restart it
                 gap_inquiry_stop();
             }
@@ -805,6 +846,7 @@ static void CORE0_RAM_FUNC(hci_packet_handler)(uint8_t packet_type, uint16_t cha
             gap_connectable_control(1);
             update_discoverable();
             const uint8_t reason = hci_event_disconnection_complete_get_reason(packet);
+            if (pair_stage != pair_error_text) pair_error("Disconnected", reason);
             device_found = false;
             new_pair = false;
             connect_attempt_started = 0; // disarm — every teardown clears here
@@ -814,6 +856,8 @@ static void CORE0_RAM_FUNC(hci_packet_handler)(uint8_t packet_type, uint16_t cha
             hid_interrupt_cid = 0;
             feature_data.clear();
             dse_reset();
+            check_dse = false;
+            ds4_ready = false;
             // Packets still queued for the old link would leave every output
             // dead after a reconnect (bt_write only asks to send when the
             // queue goes from empty to one). Upstream a1492fd/697ade0.
@@ -823,7 +867,10 @@ static void CORE0_RAM_FUNC(hci_packet_handler)(uint8_t packet_type, uint16_t cha
             page_scan_fast(true);
             // The controller's last input mustn't linger (a held button or
             // stick showing on the OLED / first report). Upstream 8c8b527.
-            if (bt_data_callback) bt_data_callback(INTERRUPT, const_cast<uint8_t *>(kNeutralInput), sizeof(kNeutralInput));
+            if (bt_data_callback) {
+                if (bt_is_ds4()) bt_data_callback(INTERRUPT, nullptr, 0);
+                else bt_data_callback(INTERRUPT, const_cast<uint8_t *>(kNeutralInput), sizeof(kNeutralInput));
+            }
             state_clear_host_rumble();
             cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, false);
 #if ENABLE_BATT_LED
@@ -858,6 +905,17 @@ static void CORE0_RAM_FUNC(l2cap_packet_handler)(uint8_t packet_type, uint16_t c
             // printf_hexdump(packet, size);
             bt_data_callback(INTERRUPT, packet, size);
 
+            if (bt_is_ds4()) {
+                uint8_t raw[63], view[63];
+                if (ds4::input(packet, size, raw)) {
+                    ds4::view(raw, view);
+                    if (ds4::active(view)) inactive_time = get_absolute_time();
+                    else if (!get_config().disable_inactive_disconnect &&
+                        absolute_time_diff_us(inactive_time, get_absolute_time()) >
+                        static_cast<int64_t>(get_config().inactive_time) * 60000000) bt_disconnect();
+                }
+                return;
+            }
             // 静默检测. Only input reports count (packet[2] bit 0): the mic's
             // frames never look idle, so with the mic on the controller was
             // never disconnected. Upstream d7fb163.
@@ -881,10 +939,22 @@ static void CORE0_RAM_FUNC(l2cap_packet_handler)(uint8_t packet_type, uint16_t c
                 bt_disconnect();
             }
         } else if (channel == hid_control_cid) {
-            if (packet[0] == 0xA3) {
+            if (size >= 2 && packet[0] == 0xA3) {
+                if (bt_is_ds4()) {
+                    const auto check = ds4::feature(packet, size);
+                    if (check != ds4::FeatureCheck::Ok) {
+                        if (check == ds4::FeatureCheck::Crc) pair_error("Feature CRC", packet[1]);
+                        else if (check == ds4::FeatureCheck::Length) {
+                            snprintf(pair_error_text, sizeof(pair_error_text), "F%02X len:%u", packet[1], unsigned(size));
+                            pair_stage = pair_error_text;
+                        }
+                        return;
+                    }
+                }
                 uint8_t report_id = packet[1];
                 // lifetime: OK — reuses the id's buffer (same size each reply); new ids only until disconnect clears
                 feature_data[report_id].assign(packet + 1, packet + size);
+                if (bt_is_ds4()) pair_progress(report_id == 0x05 ? "Pair: FW wait" : "Pair: CAL wait");
                 dse_on_feature_reply(report_id);  // a fresh reply a live read may answer with (dse.h)
 #if ENABLE_VERBOSE
                 printf("[L2CAP] Stored Feature Report 0x%02X, len=%u\n", report_id, size - 1);
@@ -892,8 +962,25 @@ static void CORE0_RAM_FUNC(l2cap_packet_handler)(uint8_t packet_type, uint16_t c
                 // The model comes from the firmware report (upstream 2efc855):
                 // sw series 0x44 = Edge. It is init_feature()'s last request, so
                 // 0x09/0x22/0x05 are cached before USB connects.
-                if (check_dse && report_id == 0x20) {
+                if (bt_is_ds4() && !ds4_ready && feature_data.contains(0x05) &&
+                    feature_data.contains(0xA3) && feature_data.at(0x05).size() == 41 &&
+                    feature_data.at(0xA3).size() == 49) {
+                    ds4_ready = true;
+                    g_scan.close();
+                    pair_progress(nullptr);
+                    is_dse = false;
+                    dse_reset();
+                    const int own = slot_for_controller(g_current_slot, current_device_addr);
+                    if (own != g_current_slot && !make_slot_current(own)) oled_notice(oled_toast::kSlot);
+                    if (!slot_is_ds4(g_current_slot) &&
+                        !slot_assign(g_current_slot, current_device_addr, true)) oled_notice(oled_toast::kPair);
+                    connect_attempt_started = 0;
+                    usb_power_controller(true);
+                    bt_send_state();
+                }
+                if (!bt_is_ds4() && check_dse && report_id == 0x20) {
                     check_dse = false;
+                    pair_progress(nullptr);
                     const auto &fw = feature_data[0x20];
                     is_dse = fw_report::is_edge(fw.data(), fw.size());
                     printf("Connected %s Controller\n", is_dse ? "DSE" : "DS5");
@@ -927,6 +1014,7 @@ static void CORE0_RAM_FUNC(l2cap_packet_handler)(uint8_t packet_type, uint16_t c
             if (status == 0) {
                 const uint16_t psm = l2cap_event_channel_opened_get_psm(packet);
                 if (psm == PSM_HID_CONTROL) {
+                    pair_progress("Pair: HID input");
                     printf("[L2CAP] HID Control opened cid=0x%04X\n", local_cid);
                     hid_control_cid = local_cid;
 
@@ -940,7 +1028,7 @@ static void CORE0_RAM_FUNC(l2cap_packet_handler)(uint8_t packet_type, uint16_t c
                                bd_addr_to_str(current_device_addr), own, g_current_slot, own);
                         // error: SHOWN — OLED status line "Slot: Save FAIL" on whichever screen is up (error pass F1; was SILENT-BUG: a failed save boots it in the old slot)
                         if (!make_slot_current(own)) oled_notice(oled_toast::kSlot);
-                    } else if (!slot_occupied(g_current_slot)) {
+                    } else if (!bt_is_ds4() && !slot_occupied(g_current_slot)) {
                         // error: SHOWN — OLED status line "Pair: Save FAIL" on whichever screen is up (error pass F1; was SILENT-BUG: the pairing is lost at power-off)
                         if (!slot_assign(g_current_slot, current_device_addr)) oled_notice(oled_toast::kPair);
                         printf("[Slots] Assigned %s to slot %d\n",
@@ -958,10 +1046,13 @@ static void CORE0_RAM_FUNC(l2cap_packet_handler)(uint8_t packet_type, uint16_t c
                                              MTU_INTERRUPT, &hid_interrupt_cid);
                     }
                 } else if (psm == PSM_HID_INTERRUPT) {
+                    pair_progress("Pair: FEAT wait");
                     printf("[L2CAP] HID Interrupt opened cid=0x%04X\n", local_cid);
                     hid_interrupt_cid = local_cid;
                     page_scan_fast(false);
-                    g_scan.close();  // connected: the pairing window is over
+                    // A DS4 candidate is not confirmed until its features arrive.
+                    // Keep the scan window available if that probe fails.
+                    if (!bt_is_ds4()) g_scan.close();
 
                     if (!get_config().disable_pico_led) {
                         cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, true);
@@ -973,7 +1064,7 @@ static void CORE0_RAM_FUNC(l2cap_packet_handler)(uint8_t packet_type, uint16_t c
                     init_feature();
                     // 初始化手柄状态
                     bt_send_state();
-                    audio_on_bt_connected(); // re-send state + mic-stream state once USB is up
+                    if (!bt_is_ds4()) audio_on_bt_connected(); // re-send state + mic-stream state once USB is up
 
                     const auto mtu = l2cap_get_remote_mtu_for_local_cid(hid_interrupt_cid);
                     printf("[L2CAP] Remote Interrupt MTU: %d\n",mtu);
@@ -995,6 +1086,7 @@ static void CORE0_RAM_FUNC(l2cap_packet_handler)(uint8_t packet_type, uint16_t c
                 hid_control_cid = 0;
                 hid_interrupt_cid = 0;
                 device_found = false;
+                pair_error("HID failed", status);
                 printf("[L2CAP] Open failed psm=0x%04X status=0x%02X\n", psm, status);
                 // error: NOT-WORTH — nothing; false only when there is no ACL, i.e. already disconnected
                 bt_disconnect();
@@ -1045,6 +1137,10 @@ static void CORE0_RAM_FUNC(l2cap_packet_handler)(uint8_t packet_type, uint16_t c
             if (queue_try_remove(&send_fifo, &send_packet)) {
                 // error: LOGGED-OK — printf of the L2CAP status; one output report lost, the game's next one (sent every frame) replaces it
                 const uint8_t status = l2cap_send(hid_interrupt_cid, send_packet.data, send_packet.len);
+                if (bt_is_ds4() && send_packet.len == ds4::kAudioReportBytes + 1 && send_packet.data[1] == 0x17) {
+                    if (status == 0) ++ds4_audio_sent_count;
+                    else ++ds4_audio_error_count;
+                }
                 if (status != 0) {
                     printf("[L2CAP] L2CAP Send Error, Status: 0x%02X\n", status);
                 }
@@ -1062,7 +1158,33 @@ static void CORE0_RAM_FUNC(l2cap_packet_handler)(uint8_t packet_type, uint16_t c
 // mode) as a 0x32 SetStateData report. Sent at L2CAP open and again once the
 // host has enumerated us: the DS5 drops the first copy while it is still
 // answering init_feature()'s requests (lightbar stayed on the player LED only).
+bool bt_ds4_output(const uint8_t *payload, uint16_t len) {
+    uint8_t out[78];
+    return bt_is_ds4() && ds4::output(payload, len, out) && bt_write(out, sizeof(out));
+}
+
+bool bt_ds4_audio_output(const uint8_t *report, uint16_t len) {
+    return bt_is_ds4() && ds4::valid_audio_output(report, len) &&
+           bt_write(report, len);
+}
+
+bool bt_ds4_volume(uint8_t target, uint8_t level) {
+    if (!bt_is_ds4()) return false;
+    uint8_t report[78];
+    ds4::audio_volume(target, level, report);
+    return bt_write(report, sizeof(report));
+}
+
 void bt_send_state() {
+    if (bt_is_ds4()) {
+        uint8_t p[31]{};
+        p[0] = 0x02;
+        state_get_led(&p[5], &p[6], &p[7]);
+        bt_ds4_output(p, sizeof(p));
+        ds4_audio_reset();
+        ds4_audio_controls(true);
+        return;
+    }
     uint8_t report32[142]{};
     report32[0] = 0x32;
     report32[1] = 0x10; // reportSeqCounter
@@ -1078,6 +1200,8 @@ void bt_send_state() {
 bool CORE0_RAM_FUNC(bt_write)(const uint8_t *data, const uint16_t len) {
     // error: NOT-WORTH — nothing; no controller connected: the PC's output report has nowhere to go (the app and OLED already show no controller)
     if (hid_interrupt_cid == 0) return false;
+    if (bt_is_ds4() && !((len == 78 && data[0] == 0x11) ||
+                         ds4::valid_audio_output(data, len))) return false;
     if (len + 1u > sizeof(send_element::data)) {
         printf("[L2CAP bt_write] Error: %u-byte report exceeds send buffer\n", len);
         // error: LOGGED-OK — printf; no caller builds a report this long (they are 78 to 334 bytes), so only a code change gets here
@@ -1109,6 +1233,7 @@ bool CORE0_RAM_FUNC(bt_write)(const uint8_t *data, const uint16_t len) {
 // Sends the GET for a feature report unless the cache can answer: 0x81 (test
 // command results) and the Edge's profile reports are always asked again.
 void bt_request_feature(uint8_t reportId) {
+    if (bt_is_ds4() && reportId != 0x05 && reportId != 0xA3) return;
     // 若为0x81则会请求新内容，其他若有旧数据则不进行请求
     if (!feature_data.contains(reportId) ||
         // Get Test Command Result
@@ -1161,6 +1286,7 @@ std::vector<uint8_t> bt_peek_feature(uint8_t reportId) {
 }
 
 void set_feature_data(uint8_t reportId, uint8_t *data, uint16_t len) {
+    if (bt_is_ds4()) return;
     // error: LOGGED-OK — printf; a host SET this short (or long) is malformed and is dropped instead of corrupting the stack (src/ctrl_send.h)
     if (!set_feature_len_ok(len, kCtrlFrameMax)) {
         printf("[L2CAP] Set Feature 0x%02X with %u bytes dropped\n", reportId, len);
@@ -1181,6 +1307,19 @@ void set_feature_data(uint8_t reportId, uint8_t *data, uint16_t len) {
 }
 
 void init_feature() {
+    if (bt_data_callback) {
+        if (bt_is_ds4()) bt_data_callback(INTERRUPT, nullptr, 0);
+        else bt_data_callback(INTERRUPT, const_cast<uint8_t *>(kNeutralInput), sizeof(kNeutralInput));
+    }
+    if (bt_is_ds4()) {
+        is_dse = false;
+        feature_data.clear();
+        check_dse = false;
+        ds4_ready = false;
+        bt_request_feature(0x05); // enables full 0x11 input
+        bt_request_feature(0xA3);
+        return;
+    }
     bt_request_feature(0x09);
     bt_request_feature(0x22);
     bt_request_feature(0x05);

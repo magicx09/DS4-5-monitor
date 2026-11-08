@@ -33,12 +33,13 @@ std::vector<Fixture> load_fixtures() {
     for (const auto &dir : fs::directory_iterator(CONFIG_FIXTURES)) {
         if (!dir.is_directory() || dir.path().filename().string().rfind('v', 0) != 0) continue;
         unsigned body = 0, inact = 0, hg = 0;
-        std::FILE *lf = std::fopen((dir.path() / "layout.txt").c_str(), "r");
-        if (!lf || std::fscanf(lf, "body_size %u inactive_time %u haptics_gain %u", &body, &inact, &hg) != 3) {
-            std::fprintf(stderr, "  bad layout.txt in %s\n", dir.path().c_str());
+        std::ifstream lf(dir.path() / "layout.txt");
+        std::string body_key, inactive_key, haptics_key;
+        if (!(lf >> body_key >> body >> inactive_key >> inact >> haptics_key >> hg) ||
+            body_key != "body_size" || inactive_key != "inactive_time" || haptics_key != "haptics_gain") {
+            std::fprintf(stderr, "  bad layout.txt in %s\n", dir.path().string().c_str());
             CHECK(false);
         }
-        if (lf) std::fclose(lf);
         // loop: NOT-WORTH — host test
         for (const auto &f : fs::directory_iterator(dir.path())) {
             if (f.path().extension() != ".bin") continue;

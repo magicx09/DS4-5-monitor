@@ -11,7 +11,7 @@
 #include "pico/multicore.h"
 #include "hardware/sync.h"
 
-// Erase one sector and program its first page, with core1 parked in RAM for
+// Erase one sector and program its first page(s), with core1 parked in RAM for
 // the duration. save_and_disable_interrupts() alone only stops core0 — core1
 // (audio: Opus encode, mic decode) kept fetching from XIP while flash was
 // being erased and could fault or read garbage. flash_safe_execute() uses the
@@ -21,16 +21,18 @@
 struct FlashSectorWrite {
     uint32_t offset;
     const uint8_t *page;
+    uint32_t bytes;
 };
 
 inline void flash_sector_write_cb(void *param) {
     const auto *w = static_cast<const FlashSectorWrite *>(param);
     flash_range_erase(w->offset, FLASH_SECTOR_SIZE);
-    flash_range_program(w->offset, w->page, FLASH_PAGE_SIZE);
+    flash_range_program(w->offset, w->page, w->bytes);
 }
 
-inline bool flash_sector_write(uint32_t offset, const uint8_t *page) {
-    FlashSectorWrite w{offset, page};
+inline bool flash_sector_write(uint32_t offset, const uint8_t *page, uint32_t bytes = FLASH_PAGE_SIZE) {
+    if (!bytes || bytes > FLASH_SECTOR_SIZE || bytes % FLASH_PAGE_SIZE) return false;
+    FlashSectorWrite w{offset, page, bytes};
     // Writes before core1 registers for lockout are handled inside the
     // flash_safe_execute wrapper (src/main.cpp).
     // error: SHOWN — returned false to every save (config/remap/calib/slots), which report it; counted in g_fse_fail

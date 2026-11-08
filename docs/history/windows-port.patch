@@ -1,0 +1,105 @@
+--- a/tests/host/CMakeLists.txt
++++ b/tests/host/CMakeLists.txt
+@@ -81,6 +81,11 @@
+ # Same char signedness as the firmware build (CMakeLists.txt: -fsigned-char).
+ target_compile_options(host_tests PRIVATE -O1 -g -fsigned-char -Wall -Wextra -Wno-unused-parameter ${SAN})
+ target_link_options(host_tests PRIVATE ${SAN})
++if(WIN32 AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
++        # Windows ASan exports strong new/delete symbols. Count allocations
++        # through its supported hooks instead of overriding those symbols.
++        target_compile_definitions(host_tests PRIVATE DS5_WINDOWS_ASAN=1)
++endif()
+ find_package(Threads REQUIRED)  # test_perf.cpp: a writer thread stands in for core1
+ target_link_libraries(host_tests PRIVATE Threads::Threads)
+ 
+--- a/tests/host/test_config_fixtures.cpp
++++ b/tests/host/test_config_fixtures.cpp
+@@ -33,12 +33,13 @@
+     for (const auto &dir : fs::directory_iterator(CONFIG_FIXTURES)) {
+         if (!dir.is_directory() || dir.path().filename().string().rfind('v', 0) != 0) continue;
+         unsigned body = 0, inact = 0, hg = 0;
+-        std::FILE *lf = std::fopen((dir.path() / "layout.txt").c_str(), "r");
+-        if (!lf || std::fscanf(lf, "body_size %u inactive_time %u haptics_gain %u", &body, &inact, &hg) != 3) {
+-            std::fprintf(stderr, "  bad layout.txt in %s\n", dir.path().c_str());
++        std::ifstream lf(dir.path() / "layout.txt");
++        std::string body_key, inactive_key, haptics_key;
++        if (!(lf >> body_key >> body >> inactive_key >> inact >> haptics_key >> hg) ||
++            body_key != "body_size" || inactive_key != "inactive_time" || haptics_key != "haptics_gain") {
++            std::fprintf(stderr, "  bad layout.txt in %s\n", dir.path().string().c_str());
+             CHECK(false);
+         }
+-        if (lf) std::fclose(lf);
+         // loop: NOT-WORTH — host test
+         for (const auto &f : fs::directory_iterator(dir.path())) {
+             if (f.path().extension() != ".bin") continue;
+--- a/tests/host/test_heap.cpp
++++ b/tests/host/test_heap.cpp
+@@ -7,6 +7,23 @@
+ 
+ long g_heap_allocs = 0;
+ 
++#if defined(DS5_WINDOWS_ASAN)
++#include <sanitizer/allocator_interface.h>
++#include "test.h"
++namespace {
++void count_alloc(const volatile void *, std::size_t) { ++g_heap_allocs; }
++void count_free(const volatile void *) {}
++const int hooks_installed = __sanitizer_install_malloc_and_free_hooks(count_alloc, count_free);
++}
++
++TEST(windows_asan_heap_counter_observes_new) {
++    CHECK(hooks_installed > 0);
++    const long before = g_heap_allocs;
++    void *p = ::operator new(32);
++    CHECK(g_heap_allocs > before);
++    ::operator delete(p);
++}
++#else
+ void *operator new(std::size_t n) {
+     g_heap_allocs++;
+     if (void *p = std::malloc(n ? n : 1)) return p;
+@@ -17,3 +34,4 @@
+ void operator delete[](void *p) noexcept { std::free(p); }
+ void operator delete(void *p, std::size_t) noexcept { std::free(p); }
+ void operator delete[](void *p, std::size_t) noexcept { std::free(p); }
++#endif
+--- a/tools/build_fusion_12px_prop_font.py
++++ b/tools/build_fusion_12px_prop_font.py
+@@ -21,7 +21,7 @@
+     ascent = descent = None
+     current = None
+     bitmap = False
+-    for line in path.read_text().splitlines():
++    for line in path.read_text(encoding='utf-8').splitlines():
+         if line.startswith('FONT_ASCENT '):
+             ascent = int(line.split()[1])
+         elif line.startswith('FONT_DESCENT '):
+@@ -50,7 +50,7 @@
+ def corpus():
+     chars = set(map(chr, range(32, 127)))
+     for name in ('home_zh.h', 'ui_zh.h', 'settings_menu.h', 'oled.cpp'):
+-        for literal in re.findall(r'"([^"\n]*)"', (ROOT / 'src' / name).read_text()):
++        for literal in re.findall(r'"([^"\n]*)"', (ROOT / 'src' / name).read_text(encoding='utf-8')):
+             if any(ord(ch) > 126 for ch in literal):
+                 chars.update(literal)
+     return chars
+@@ -95,7 +95,7 @@
+     lines += [','.join(f'0x{value:02x}' for value in bitmap[i:i + 24]) + ','
+               for i in range(0, len(bitmap), 24)]
+     lines += ['};', '}', '']
+-    destination.write_text('\n'.join(lines))
++    destination.write_text('\n'.join(lines), encoding='utf-8', newline='\n')
+     print(f'{destination.name}: {len(chars)} glyphs, {len(bitmap)} bitmap bytes, '
+           f'ascent {ascent}, descent {descent}')
+ 
+--- a/tools/check_ram_residency.sh
++++ b/tools/check_ram_residency.sh
+@@ -119,7 +119,7 @@
+ done
+ # 4. What core1's RAM code calls: no new call into flash (tools/check_core1_calls.py,
+ #    which walks the calls from core1_entry; its allow-list names each known one).
+-OBJDUMP="${OBJDUMP:-arm-none-eabi-objdump}" python3 "$(dirname "$0")/check_core1_calls.py" "$ELF" || bad=1
++OBJDUMP="${OBJDUMP:-arm-none-eabi-objdump}" "${PYTHON:-python3}" "$(dirname "$0")/check_core1_calls.py" "$ELF" || bad=1
+ if [ "$bad" = 0 ]; then
+   if [ -n "$CORE0" ]; then
+     echo "check_ram_residency: core1's audio path and core0's BT/USB hot path are RAM-resident"

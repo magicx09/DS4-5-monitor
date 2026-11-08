@@ -183,9 +183,21 @@ TEST(fwid_config_display_migration_and_save) {
     fresh();
     CHECK_EQ(config_display_id(), display::kPicoOled13);  // erased flash
     CHECK_EQ(offsetof(Config, display_id), offsetof(Config, power_flags) + 1);
+    CHECK_EQ(offsetof(Config, screen_flipped), offsetof(Config, display_id) + 1);
     CHECK_EQ(sizeof(Config_body), 53u);  // the display choice isn't in the body (protocol 1.22 grew it, not 1.21)
     CHECK(config_save());
     CHECK(!config_unsaved());
+    CHECK(!config_screen_flipped());
+
+    Config_body flip_edit = get_config();
+    flip_edit.inactive_time = 43;
+    set_config(flip_edit);
+    CHECK(config_save_screen_flipped(true));
+    CHECK(config_screen_flipped());
+    CHECK(config_unsaved());  // the body edit remains unsaved
+    config_load();
+    CHECK(config_screen_flipped());
+    CHECK_EQ(get_config().inactive_time, 30);
 
     // A page saved by firmware before 1.21: 0xFF there. Reads as the
     // Pico-OLED-1.3, and isn't an unsaved change.
@@ -215,10 +227,17 @@ TEST(fwid_config_display_migration_and_save) {
     CHECK(config_save());
     config_load();
     CHECK_EQ(config_display_id(), display::kNone);
+    CHECK(config_screen_flipped());
+
+    CHECK(config_save_screen_flipped(false));
+    CHECK(!config_screen_flipped());
+    config_load();
+    CHECK(!config_screen_flipped());
 
     // A failed write says so.
     g_fake_flash_fail = true;
     CHECK(!config_save_display_id(display::kPicoOled13));
+    CHECK(!config_save_screen_flipped(true));
     g_fake_flash_fail = false;
 }
 

@@ -119,7 +119,7 @@ for sym in $CORE0_OPTIONAL; do
 done
 # 4. What core1's RAM code calls: no new call into flash (tools/check_core1_calls.py,
 #    which walks the calls from core1_entry; its allow-list names each known one).
-OBJDUMP="${OBJDUMP:-arm-none-eabi-objdump}" python3 "$(dirname "$0")/check_core1_calls.py" "$ELF" || bad=1
+OBJDUMP="${OBJDUMP:-arm-none-eabi-objdump}" "${PYTHON:-python3}" "$(dirname "$0")/check_core1_calls.py" "$ELF" || bad=1
 if [ "$bad" = 0 ]; then
   if [ -n "$CORE0" ]; then
     echo "check_ram_residency: core1's audio path and core0's BT/USB hot path are RAM-resident"

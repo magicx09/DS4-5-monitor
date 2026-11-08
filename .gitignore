@@ -9,3 +9,14 @@ example
 .directory
 *.code-workspace
 pr-review-*.md
+
+# Local dependencies, credentials and generated output
+.local/
+deps/
+logs/
+firmware/
+artifacts/
+__pycache__/
+*.pyc
+.env
+.env.*

@@ -6,6 +6,8 @@
 #include "bsp/board_api.h"
 #include "bt.h"
 #include "bt_policy.h"
+#include "ds4_protocol.h"
+static uint8_t ds4_input[63] = {128,128,128,128,8};
 #include "core0_ram.h"
 #include "utils.h"
 #include "resample.h"
@@ -15,7 +17,9 @@
 #include "hardware/vreg.h"
 #include "hardware/watchdog.h"
 #include "pico/cyw43_arch.h"
+#include "gap.h"
 #include "state_mgr.h"
+#include "rumble_scale.h"
 #include "status_gpio.h"
 #if ENABLE_SERIAL
 #include "pico/stdio_usb.h"
@@ -26,6 +30,7 @@
 #include "battery_led.h"
 #endif
 #include "oled.h"
+#include "ui_zh.h"
 #include "remap.h"
 #include "calib.h"
 #include "perf.h"
@@ -44,12 +49,6 @@
 #include "pico/multicore.h"
 
 uint8_t reportSeqCounter = 0; // 4-bit BT output sequence, shared with audio.cpp
-
-// A rumble motor value times a grip haptics strength [1,6], clamped.
-static uint8_t scale_rumble(uint8_t v, float gain) {
-    const int s = (int) ((float) v * gain + 0.5f);
-    return (uint8_t) (s > 255 ? 255 : s);
-}
 
 bool spk_active = false;
 extern bool g_lightbar_override; // oled.cpp: OLED owns the lightbar
@@ -140,7 +139,19 @@ void CORE0_RAM_FUNC(interrupt_loop)() {
     }
 
     // Only the wake keyboard on the bus: HID instance 0 isn't the DualSense.
-    if (usb_wake_keyboard() || !tud_hid_ready()) return;
+    if (usb_wake_keyboard() || !tud_hid_ready() || usb_ds4() != bt_is_ds4()) return;
+    if (bt_is_ds4()) {
+        if (!bt_is_connected()) return;
+        if (get_config().polling_rate_mode == 2 && !report_dirty) return;
+        uint8_t out[63], view[63];
+        memcpy(out, ds4_input, sizeof(out));
+        memcpy(view, interrupt_in_data, sizeof(view));
+        calib_apply(view);
+        remap_apply(view);
+        ds4::apply_view(view, out);
+        if (tud_hid_report(0x01, out, sizeof(out))) report_dirty = false;
+        return;
+    }
 
     // TODO: Refactor for better code reuse
     if (get_config().polling_rate_mode != 2) {
@@ -158,7 +169,7 @@ void CORE0_RAM_FUNC(interrupt_loop)() {
     }
 
     bool should_send = false;
-    // Local buffer to hold the report data while we prepare it to send. 
+    // Local buffer to hold the report data while we prepare it to send.
     uint8_t safe_report[63];
 
     if (report_dirty) {
@@ -179,7 +190,7 @@ void CORE0_RAM_FUNC(interrupt_loop)() {
         if (!tud_hid_report(0x01, safe_report, 63)) {
             printf("[USBHID] tud_hid_report error\n");
 
-            // If the report failed to queue, restore the dirty flag 
+            // If the report failed to queue, restore the dirty flag
             // so we try again on the next loop iteration.
             report_dirty = true;
         }
@@ -187,6 +198,14 @@ void CORE0_RAM_FUNC(interrupt_loop)() {
 }
 
 void CORE0_RAM_FUNC(on_bt_data)(CHANNEL_TYPE channel, uint8_t *data, uint16_t len) {
+    if (bt_is_ds4()) {
+        if (channel != INTERRUPT) return;
+        if (!data && len == 0) ds4::neutral(ds4_input);
+        else if (!ds4::input(data, len, ds4_input)) return;
+        ds4::view(ds4_input, interrupt_in_data);
+        report_dirty = true;
+        return;
+    }
     // printf("[Main] BT data callback: channel=%u len=%u\n", channel, len);
     // Track ALL INTERRUPT input reports, not just 0x31. The mic stream
     // may live on a different report ID — confirmed 2026-05-19 that data[2]
@@ -298,6 +317,31 @@ uint16_t tud_hid_get_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t
         if (reqlen < 8) return 0;
         memset(buffer, 0, 8);
         return 8;
+    }
+    if (usb_ds4() != bt_is_ds4()) return 0;
+    if (usb_ds4()) {
+        if (report_type != HID_REPORT_TYPE_FEATURE) return 0;
+        if ((report_id == 0x12 && reqlen >= 15) || (report_id == 0x81 && reqlen >= 6)) {
+            uint8_t mac[6]; bt_get_addr(mac);
+            const uint16_t n = report_id == 0x12 ? 15 : 6;
+            memset(buffer, 0, n);
+            for (int i = 0; i < 6; ++i) buffer[i] = mac[5-i];
+            if (report_id == 0x12) {
+                buffer[6] = 8; buffer[7] = 0x25;
+                bd_addr_t local; gap_local_bd_addr(local);
+                for (int i = 0; i < 6; ++i) buffer[9+i] = local[5-i];
+            }
+            return n;
+        }
+        const uint8_t id = report_id == 0x02 ? 0x05 : report_id;
+        if (id != 0x05 && id != 0xA3) return 0;
+        auto data = bt_peek_feature(id);
+        if (id == 0x05) {
+            if (data.size() != 41 || reqlen < 36) return 0;
+            ds4::calibration(data.data()+1, buffer);
+            return 36;
+        }
+        return ds4::firmware_usb(data.data(), data.size(), buffer, reqlen);
     }
     const uint16_t n = get_report_impl(itf, report_id, report_type, buffer, reqlen);
     if (report_id < 0xF2) { // don't record our own diagnostic reads
@@ -413,6 +457,7 @@ static uint16_t get_report_impl(uint8_t itf, uint8_t report_id, hid_report_type_
 // Unplug / host reset: no SET_INTERFACE alt 0 arrives, so close the mic here.
 void tud_umount_cb(void) {
     audio_set_mic_active(false);
+    if (usb_ds4()) { spk_active = false; ds4_audio_reset(); }
 }
 
 bool tud_audio_set_itf_cb(uint8_t rhport, tusb_control_request_t const *p_request) {
@@ -420,6 +465,14 @@ bool tud_audio_set_itf_cb(uint8_t rhport, tusb_control_request_t const *p_reques
     uint8_t const itf = tu_u16_low(p_request->wIndex); // wInterface
     uint8_t const alt = tu_u16_low(p_request->wValue); // bAlternateSetting
 
+    if (usb_ds4()) {
+        if (itf == 1) {
+            spk_active = alt != 0;
+            ds4_audio_reset();
+            if (spk_active) ds4_audio_controls(true);
+        }
+        return true;
+    }
     if (itf == 1) {
         printf("[AUDIO] Set interface Speaker to alternate setting %d\n", alt);
         spk_active = alt;
@@ -534,7 +587,21 @@ void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t rep
     (void) buffer;
     (void) bufsize;
 
-    if (usb_wake_keyboard()) return;  // the wake keyboard's LED report: nothing to do
+    if (usb_wake_keyboard() || usb_ds4() != bt_is_ds4()) return;
+    if (usb_ds4()) {
+        const uint8_t *p = buffer;
+        size_t n = bufsize;
+        if (report_id == 0 && n && p[0] == 0x05) { ++p; --n; }
+        else if (report_id != 0x05 || report_type != HID_REPORT_TYPE_OUTPUT) return;
+        if (n != 31) return;
+        uint8_t payload[31]; memcpy(payload, p, 31);
+        payload[3] = scale_rumble(payload[3], get_config().haptics_gain_right);
+        payload[4] = scale_rumble(payload[4], get_config().haptics_gain);
+        if (g_lightbar_override) payload[0] &= ~6;
+        else if (payload[0] & 2) state_set_led(payload[5], payload[6], payload[7]);
+        bt_ds4_output(payload, sizeof(payload));
+        return;
+    }
 
     if (report_id != 0) {
         g_setfeat_count = g_setfeat_count + 1;
@@ -587,7 +654,7 @@ void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t rep
 // release gate that checks an image against its feed entry (step 7, G2). The
 // SDK already records PICO_BOARD; these are the feed's own names.
 bi_decl(bi_string(BINARY_INFO_MAKE_TAG(DS5_BI_TAG_C1, DS5_BI_TAG_C2), fwid::kBiBoard, DS5_BOARD_KEY));
-bi_decl(bi_string(BINARY_INFO_MAKE_TAG(DS5_BI_TAG_C1, DS5_BI_TAG_C2), fwid::kBiPersonas, "ds5"));
+bi_decl(bi_string(BINARY_INFO_MAKE_TAG(DS5_BI_TAG_C1, DS5_BI_TAG_C2), fwid::kBiPersonas, ENABLE_DS4 ? "ds5,ds4" : "ds5"));
 bi_decl(bi_string(BINARY_INFO_MAKE_TAG(DS5_BI_TAG_C1, DS5_BI_TAG_C2), fwid::kBiDisplays, DS5_DISPLAYS_BI));
 
 #if PICO_RP2350 && SYS_CLOCK_KHZ == 150000 && SYS_CLK_KHZ != 150000
@@ -654,7 +721,11 @@ int main() {
         if (radio_boot::should_stop(count)) {
             printf("No wireless chip found, stopped\n");
             config_load();  // the saved display choice; reads only, unless an old config needs moving
+#ifdef OLED_ZH
+            oled_fault(ui_zh::kFault1, ui_zh::kFault2, ui_zh::kFault3);
+#else
             oled_fault("No wireless chip", "found: this firmware", "is for the " DS5_BOARD_NAME);
+#endif
             // loop: NOT-WORTH — stopped on purpose (no radio); the watchdog isn't armed, unplugging starts over
             for (;;) tight_loop_contents();
         }
@@ -736,8 +807,8 @@ int main() {
         state_config_task();
         status_gpio_task();
         const uint32_t t2c = perf_now();
-        audio_loop();
-        voice_task();
+        if (bt_is_ds4()) ds4_audio_loop();
+        else { audio_loop(); voice_task(); }
         const uint32_t t3 = perf_now();
         perf_record(PERF_AUDIO, t3 - t2c);
         interrupt_loop();

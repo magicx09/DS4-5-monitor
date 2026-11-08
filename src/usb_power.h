@@ -279,6 +279,8 @@ private:
 // True while the dongle presents only the wake keyboard: HID instance 0 is
 // then the keyboard, so nothing may send DualSense reports. A plain global, so
 // the RAM-resident interrupt_loop can read it without a flash call.
+extern bool g_usb_ds4;
+inline bool usb_ds4() { return g_usb_ds4; }
 extern bool g_usb_wake_keyboard;
 inline bool usb_wake_keyboard() { return g_usb_wake_keyboard; }
 

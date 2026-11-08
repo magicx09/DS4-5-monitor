@@ -22,10 +22,12 @@ constexpr char kBrightness[] = "Bright: Save FAIL";
 constexpr char kLightbar[] = "Lightbar: Save FAIL";
 constexpr char kSlot[] = "Slot: Save FAIL";
 constexpr char kPair[] = "Pair: Save FAIL";
+constexpr char kFlip[] = "Flip: Save FAIL";
 static_assert(sizeof(kBrightness) - 1 <= kMaxChars, "toast too wide");
 static_assert(sizeof(kLightbar) - 1 <= kMaxChars, "toast too wide");
 static_assert(sizeof(kSlot) - 1 <= kMaxChars, "toast too wide");
 static_assert(sizeof(kPair) - 1 <= kMaxChars, "toast too wide");
+static_assert(sizeof(kFlip) - 1 <= kMaxChars, "toast too wide");
 // A controller in pairing mode that another slot already holds (bt.cpp's
 // inquiry skips it, slot routing): which slot, as the Slots screen numbers
 // them, so the user switches there instead of waiting out the window.

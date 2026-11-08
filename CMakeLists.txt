@@ -33,7 +33,16 @@ endif ()
 #set(PICO_CYW43_SUPPORTED 1)
 #set(PICO_CYW43_ARCH_THREADSAFE_BACKGROUND 1)
 
+option(ENABLE_DS4 "DS4 controls and experimental speaker playback" ON)
 option(ENABLE_SERIAL "Enable USB CDC serial printf output" OFF)
+option(OLED_ZH "Build Chinese OLED firmware" ON)
+set(OLED_SETTINGS_ROW_HEIGHT 16 CACHE STRING "Chinese Settings row height: 14 or 16")
+if (OLED_ZH)
+        if (NOT OLED_SETTINGS_ROW_HEIGHT STREQUAL "14" AND NOT OLED_SETTINGS_ROW_HEIGHT STREQUAL "16")
+                message(FATAL_ERROR "OLED_SETTINGS_ROW_HEIGHT must be 14 or 16")
+        endif ()
+        set(OLED_FONT_KIND "prop")
+endif ()
 if (ENABLE_SERIAL)
         set(ENABLE_SERIAL_VALUE 1)
 else ()
@@ -83,7 +92,7 @@ endif ()
 # Pull in Raspberry Pi Pico SDK (must be before project)
 include(pico_sdk_import.cmake)
 
-project(ds5-bridge C CXX ASM)
+project(DS4_5_monitor C CXX ASM)
 
 # Initialise the Raspberry Pi Pico SDK
 pico_sdk_init()
@@ -116,6 +125,7 @@ add_executable(ds5-bridge
         src/usb.cpp
         src/usb_power.cpp
         src/audio.cpp
+        src/ds4_audio.cpp
         src/bt.cpp
         src/config.cpp
         src/cmd.cpp
@@ -133,6 +143,7 @@ add_executable(ds5-bridge
         src/ram_mem.c
 )
 # The narrator's lines (tools/build_voice_bank.py), .incbin'd by voice.cpp.
+target_compile_definitions(ds5-bridge PRIVATE ENABLE_DS4=$<BOOL:${ENABLE_DS4}>)
 target_compile_definitions(ds5-bridge PRIVATE VOICE_BANK_FILE="${CMAKE_CURRENT_SOURCE_DIR}/src/voice_bank.bin")
 set_source_files_properties(src/voice.cpp PROPERTIES OBJECT_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/voice_bank.bin)
 
@@ -378,6 +389,9 @@ target_compile_definitions(ds5-bridge PRIVATE
         ENABLE_COMPANION_VENDOR=${ENABLE_COMPANION_VENDOR_VALUE}
 )
 
+if(ENABLE_DS4 AND (ENABLE_SERIAL OR ENABLE_COMPANION_VENDOR))
+    message(FATAL_ERROR "DS4 basic experiment currently requires ENABLE_SERIAL=OFF and ENABLE_COMPANION_VENDOR=OFF")
+endif()
 option(ENABLE_WAKE_HID "Wake the Windows host on PS-button press" OFF)
 if(ENABLE_WAKE_HID)
     target_compile_definitions(ds5-bridge PRIVATE
@@ -401,7 +415,8 @@ endif()
 # at every configure (never a stale value kept in an old build folder):
 #   v0.9.3-oled-edition+3.a1b2c3d[.dirty]   3 commits after the tag, at a1b2c3d
 # tools/dev_firmware.sh passes the same string explicitly on every build.
-set(VERSION "" CACHE STRING "Release tag (vX.Y.Z-oled-edition); empty = a dev build, stamped from Git")
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" MONITOR_VERSION LIMIT_COUNT 1)
+set(VERSION "${MONITOR_VERSION}" CACHE STRING "DS4/5-monitor release version")
 if (VERSION STREQUAL "" OR VERSION STREQUAL "dev")
         execute_process(
                 COMMAND git describe --tags --match "v*-oled-edition" --long --dirty
@@ -418,13 +433,16 @@ if (VERSION STREQUAL "" OR VERSION STREQUAL "dev")
 else ()
         set(FW_VERSION "${VERSION}")
 endif ()
+if (OLED_ZH)
+        target_compile_definitions(ds5-bridge PRIVATE OLED_ZH=1 OLED_ROW_HEIGHT=12 OLED_SETTINGS_ROW_HEIGHT=${OLED_SETTINGS_ROW_HEIGHT})
+endif ()
 message(STATUS "Firmware version: ${FW_VERSION}")
 target_compile_definitions(ds5-bridge PRIVATE
         FIRMWARE_VERSION="${FW_VERSION}"
 )
 
 set_target_properties(ds5-bridge PROPERTIES OUTPUT_NAME "ds5-bridge-oled")
-pico_set_program_name(ds5-bridge "ds5-bridge-oled")
+pico_set_program_name(ds5-bridge "DS4/5-monitor")
 pico_set_program_version(ds5-bridge "${FW_VERSION}")
 
 # Modify the below lines to enable/disable output over UART/USB
@@ -436,7 +454,7 @@ pico_enable_stdio_usb(ds5-bridge ${ENABLE_SERIAL_VALUE})
 #        ${CMAKE_CURRENT_LIST_DIR}
 #)
 
-target_include_directories(${PROJECT_NAME} PUBLIC
+target_include_directories(ds5-bridge PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 
@@ -451,6 +469,7 @@ target_link_libraries(ds5-bridge
         hardware_spi
         hardware_adc
         pico_btstack_classic
+        pico_btstack_sbc_encoder
 #        pico_cyw43_arch_threadsafe_background
         pico_cyw43_arch_poll
         pico_btstack_cyw43
@@ -503,4 +522,3 @@ if (PICO_PLATFORM MATCHES "^rp2350")
         endif ()
         message(STATUS "Pico 2 W: clk_sys ${SYS_CLOCK_KHZ_VALUE} kHz, flash ${_ds5_flash_khz} kHz (divider ${_ds5_clkdiv}, embedded XIP setup), CYW43 PIO divider ${CYW43_PIO_CLOCK_DIV_VALUE}")
 endif ()
-

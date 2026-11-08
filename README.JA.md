@@ -1,3 +1,5 @@
+> Historical upstream documentation. It describes the upstream OLED Edition, not the DS4/5-monitor 0.01 release. Current documentation: [README](README.md).
+
 # Pico2W DualSense 5 Bridge — OLED Edition
 
 [English](README.md) · [中文](README.CN.md) · [Deutsch](README.DE.md) · [Español](README.ES.md) · [Français](README.FR.md) · **日本語** · [Português (Brasil)](README.PT-BR.md)

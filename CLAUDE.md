@@ -1,3 +1,5 @@
+> Historical upstream development notes. Current project instructions: AGENTS.md and docs/BUILD.md. Upstream app/release and all-board requirements do not describe DS4/5-monitor.
+
 # CLAUDE.md
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.

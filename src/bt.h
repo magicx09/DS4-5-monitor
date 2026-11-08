@@ -7,6 +7,17 @@
 
 #include <cstdint>
 #include <vector>
+#ifndef ENABLE_DS4
+#define ENABLE_DS4 0
+#endif
+extern bool g_bt_ds4;
+inline bool bt_is_ds4() { return ENABLE_DS4 && g_bt_ds4; }
+bool bt_ds4_output(const uint8_t *payload, uint16_t len);
+bool bt_ds4_audio_output(const uint8_t *report, uint16_t len);
+bool bt_ds4_volume(uint8_t target, uint8_t level);
+uint32_t bt_ds4_audio_sent(); // l2cap_send accepted, not a playback acknowledgement
+uint32_t bt_ds4_audio_errors();
+const char *bt_pair_diagnostic();
 
 enum CHANNEL_TYPE {
     INTERRUPT,

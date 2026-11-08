@@ -59,7 +59,8 @@ clkdiv="$("$OBJDUMP" -s -j .boot2 "$ELF" | awk '
   /^ [0-9a-f]+ / && d == "" { for (i = 2; i <= 5; i++) if (length($i) == 8 && d == "") {
       v = hex(substr($i,7,2) substr($i,5,2) substr($i,3,2) substr($i,1,2))
       # bits 31..11 must read 0x40000000 (COOLDOWN 1, nothing else), CLKDIV != 0
-      if (int(v / 2048) == 0x40000000 / 2048 && v % 256 != 0) d = v % 256 } }
+      # Decimal is intentional: macOS/POSIX awk does not parse 0x literals.
+      if (int(v / 2048) == 1073741824 / 2048 && v % 256 != 0) d = v % 256 } }
   END { print d }')"
 if [ -z "$clkdiv" ]; then
   echo "check_xip_setup: no QMI M0_TIMING word found in .boot2" >&2

@@ -1,0 +1,4 @@
+Bluedroid SBC encoder / decoder
+Copyright (C) 1999-2012 Broadcom Corporation
+Apache License, Version 2.0.
+Source: Pico SDK pinned BTstack submodule, 3rd-party/bluedroid.

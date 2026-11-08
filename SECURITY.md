@@ -1,22 +1,9 @@
-# Security
+# 安全与固件来源
 
-## Getting DS5 Dongle OLED Edition safely
+请从 [magicx09/DS4-5-monitor Releases](https://github.com/magicx09/DS4-5-monitor/releases) 获取固件，并核对附带 SHA256SUMS。校验和用于发现文件损坏或下载不一致，不等同于签名认证。
 
-- Download the firmware and the configurator app only from this repository's [releases](https://github.com/MarcelineVPQ/DS5Dongle-OLED-Edition/releases). Each release lists the SHA-256 of every file in `SHA256SUMS.txt`.
-- The app's update feed (`latest.json`, `latest-dev.json`) is signed with Ed25519 (`latest.json.sig`, `latest-dev.json.sig`); the app refuses a feed whose signature doesn't check out. The feeds are signed only on the maintainer's own computer, never in GitHub Actions: the signing key is not on GitHub, so a release published there by someone else is never offered to installed apps. Every push checks the committed feeds against the app's public keys, so an edited or unsigned feed fails the build.
-- The app installs the firmware bundled with its own release, or a release from this repository.
+本项目没有发布桌面自动更新客户端，也没有使用上游的签名更新源。原上游的相关文件仅作为历史资料保存在 docs/upstream。
 
-## Supported versions
+当前维护版本为 0.01。问题范围包括 USB / 蓝牙输入校验、配置与配对保存，以及构建发布文件。报告时请提供版本、硬件和复现条件，不要公开账号凭据、真实手柄 MAC 或含个人设备信息的完整日志。
 
-Only the latest release gets security fixes (and the latest development build on the Development channel). Please update before reporting.
-
-## Scope
-
-- The firmware: what it accepts over USB (HID feature and output reports, the configurator's vendor interface, UAC1 audio) and over Bluetooth (pairing, L2CAP control and interrupt channels), and what it stores in flash.
-- The release files: the UF2, `SHA256SUMS.txt` and the signed update feed.
-- The configurator app's code lives in [DS5Dongle-OLED-Config-Web](https://github.com/MarcelineVPQ/DS5Dongle-OLED-Config-Web) (its audit: `docs/SECURITY_AUDIT.md` there); a report about the app is welcome here too.
-- Problems in the core bridge that also affect upstream [awalol/DS5Dongle](https://github.com/awalol/DS5Dongle) are fixed here and passed on upstream once a fix is out.
-
-## Reporting a vulnerability
-
-Please report it privately through GitHub: **[Security → Report a vulnerability](https://github.com/MarcelineVPQ/DS5Dongle-OLED-Edition/security/advisories/new)** on this repository, not in a public issue. Include what you found, how to reproduce it, the firmware version (the OLED Status screen or the app's board page) and your board (Pico 2 W or Pico W). You'll get an answer as soon as possible; this is a free project, so please allow some days.
+若发现可被利用的漏洞，请通过仓库 Security 页的私密报告入口联系维护者；普通显示／配对／音频问题可以提交 Issue。本项目由个人维护，不承诺固定响应时限。

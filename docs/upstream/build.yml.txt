@@ -1,0 +1,99 @@
+name: Build firmware
+
+on:
+  push:
+    branches:
+      - "**"
+    # Docs-only pushes run nothing (Marcy 2026-11-01: CI only where it proves something).
+    paths-ignore: ["**.md", "docs/**"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build UF2 artifacts
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          submodules: recursive
+          # Full history: gate G1 compares the feeds' issued_at with HEAD~1,
+          # and the doc gates' CHANGELOG check reads the commits since the last tag.
+          fetch-depth: 0
+
+      - name: Set firmware version
+        run: printf 'FIRMWARE_VERSION=%s\n' "${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+
+      # The toolchain (pinned, checked) and every gate, shared with release.yml.
+      - name: Toolchain and gates
+        uses: ./.github/actions/firmware-checks
+        with:
+          app-ref: master
+
+      # Gate G1: the committed feeds verify against the app's public keys
+      # (TRUSTED_KEYS on the public app repo's master, checked out by the
+      # step above; no secret), each feed's channel matches its file,
+      # issued_at never goes back. Fails a hand edit.
+      - name: The update feeds are signed (gate G1)
+        run: node tools/verify_feeds.mjs --base HEAD~1 --trusted _app/electron/main/feedSignature.ts
+
+      # One image per boards.json row (release or not), each checked by gate
+      # G2 (tools/uf2_info.mjs) against its row: tools/build_board.sh. Built
+      # as they ship (release.yml): with the configurator interface.
+      - name: Build every board's firmware (boards.json, as shipped)
+        run: |
+          for board in $(node -p 'require("./boards.json").boards.map((b) => b.id).join(" ")'); do
+            tools/build_board.sh "$board" "$FIRMWARE_VERSION" -DENABLE_COMPANION_VENDOR=ON
+          done
+
+      - name: Build Debug firmware
+        run: |
+          cmake -S . -B build/debug -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DPICO_SDK_PATH="$PICO_SDK_PATH" \
+            -DENABLE_SERIAL=ON \
+            -DENABLE_VERBOSE=ON \
+            -DVERSION="$FIRMWARE_VERSION"
+          cmake --build build/debug --target ds5-bridge
+          cp build/debug/ds5-bridge-oled.uf2 artifacts/ds5-bridge-oled-debug.uf2
+
+      - name: Build no-batt-led firmware (compile check only)
+        run: |
+          cmake -S . -B build/no-batt-led -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DPICO_SDK_PATH="$PICO_SDK_PATH" \
+            -DENABLE_BATT_LED=OFF \
+            -DVERSION="$FIRMWARE_VERSION"
+          cmake --build build/no-batt-led --target ds5-bridge
+
+      # The old 320 MHz overclock, kept buildable for one release as a fallback
+      # (CMakeLists.txt DS5_CLOCK_KHZ); remove with the option.
+      - name: Build 320 MHz fallback firmware (compile check only)
+        run: |
+          cmake -S . -B build/oc320 -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DPICO_SDK_PATH="$PICO_SDK_PATH" \
+            -DDS5_CLOCK_KHZ=320000 \
+            -DVERSION="$FIRMWARE_VERSION"
+          cmake --build build/oc320 --target ds5-bridge
+          tools/check_xip_setup.sh build/oc320/ds5-bridge-oled.elf 4 13
+          python3 tools/check_flash_reserved.py build/oc320/ds5-bridge-oled.elf build/oc320/ds5-bridge-oled.uf2
+
+      # Every board's UF2 (named as in a release, {tag} = the commit) and its
+      # firmware-image-<board>.json, in one zip.
+      - name: Upload the boards' UF2 artifacts
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ds5-bridge-oled-${{ env.FIRMWARE_VERSION }}-boards
+          path: |
+            artifacts/ds5-bridge-oled-${{ env.FIRMWARE_VERSION }}*.uf2
+            artifacts/firmware-image-*.json
+          if-no-files-found: error
+
+      - name: Upload Debug UF2 artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          path: artifacts/ds5-bridge-oled-debug.uf2
+          archive: false
+          if-no-files-found: error

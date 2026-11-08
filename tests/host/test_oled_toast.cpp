@@ -32,7 +32,7 @@ TEST(oled_toast_new_message_replaces_and_restarts) {
 // Drawn the way oled.cpp's draw_toast does: every message fits its bar, right
 // of the chrome strip, inside the panel.
 TEST(oled_toast_every_message_fits) {
-    for (const char *m : {kBrightness, kLightbar, kSlot, kPair}) {
+    for (const char *m : {kBrightness, kLightbar, kSlot, kPair, kFlip}) {
         BitCanvas c;
         c.clear_rect(kBarX, kBarY, kBarW, kBarH);
         c.text(kTextX, kTextY, m);

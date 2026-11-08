@@ -18,7 +18,7 @@ struct Board {
     Buttons b;
     Injector in;
     uint32_t now = 5'000'000;
-    int next = 0, back = 0, bright = 0, reboot = 0, activity = 0, hold0 = 0;
+    int next = 0, back = 0, bright = 0, reboot = 0, activity = 0, hold0 = 0, flip = 0;
     bool hold = false;  // the screen has a KEY0 hold action (Status, no controller)
     void run(uint32_t us, bool pin0 = false, bool pin1 = false) {
         const uint32_t end = now + us;
@@ -33,6 +33,7 @@ struct Board {
             reboot += (ev & kReboot) != 0;
             activity += (ev & kActivity) != 0;
             hold0 += (ev & kHold0) != 0;
+            flip += (ev & kFlip) != 0;
             now += 1000;
         }
     }
@@ -51,6 +52,13 @@ TEST(oled_keys_physical_presses_unchanged) {
     k.run(100'000);
     CHECK_EQ(k.bright, 1);
     CHECK_EQ(k.back, 1);
+    k.run(kFlipChordUs - 100'000, true, true);
+    CHECK_EQ(k.flip, 0);
+    CHECK_EQ(k.reboot, 0);
+    k.run(kFlipChordUs + 10'000, true, true);  // chord: flip, no navigation after
+    CHECK_EQ(k.flip, 1);
+    CHECK_EQ(k.reboot, 0);
+    k.run(100'000);
     k.run(kChordHoldUs + 10'000, true, true);  // chord: reboot, no navigation after
     CHECK(k.reboot >= 1);
     k.run(100'000);
@@ -201,13 +209,17 @@ TEST(oled_keys_key0_hold_not_reachable_by_remote_or_key1) {
     CHECK_EQ(k.hold0, 0);
 }
 
-// KEY0 + KEY1 (the reboot chord) never counts as a KEY0 hold.
+// KEY0 + KEY1 flips at 2 s and reboots at 5 s; neither is a KEY0 hold.
 TEST(oled_keys_chord_is_not_a_hold) {
     Board k;
     k.hold = true;
     k.run(500'000, true);
-    k.run(2'000'000, true, true);
+    k.run(kFlipChordUs + 100'000, true, true);
+    CHECK_EQ(k.flip, 1);
+    CHECK_EQ(k.reboot, 0);
+    k.run(kChordHoldUs, true, true);
     CHECK(k.reboot >= 1);
+    CHECK_EQ(k.flip, 1);
     CHECK_EQ(k.hold0, 0);
 }
 
@@ -231,11 +243,12 @@ TEST(oled_keys_key1_hold_fires_while_held) {
     k.run(100'000);
     CHECK_EQ(k.back, 1);
     CHECK_EQ(k.bright, 1);
-    // The chord: KEY1 first, KEY0 joins before 1.5 s -> reboot, no brightness.
+    // The chord: KEY1 first, KEY0 joins before 1.5 s -> no brightness.
     k.run(500'000, false, true);
-    k.run(1'500'000, true, true);
+    k.run(kFlipChordUs + 10'000, true, true);
     k.run(100'000);
-    CHECK(k.reboot >= 1);
+    CHECK_EQ(k.flip, 1);
+    CHECK_EQ(k.reboot, 0);
     CHECK_EQ(k.bright, 1);
     CHECK_EQ(k.back, 1);
     CHECK_EQ(k.hold0, 0);

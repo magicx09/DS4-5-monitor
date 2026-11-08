@@ -8,4 +8,4 @@ GEN=()
 command -v ninja >/dev/null && GEN=(-G Ninja)
 cmake -S "$HERE" -B "$BUILD" "${GEN[@]}" -DCMAKE_BUILD_TYPE=Debug >/dev/null
 cmake --build "$BUILD"
-"$BUILD/host_tests"
+(cd "$BUILD" && ctest --output-on-failure)

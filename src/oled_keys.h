@@ -1,5 +1,5 @@
 // KEY0 / KEY1 on the OLED board: the press logic (debounce, short / long
-// press, the KEY0+KEY1 reboot chord) and the app's remote presses (0xF6 0x18,
+// press, the KEY0+KEY1 flip/reboot chords) and the app's remote presses (0xF6 0x18,
 // protocol 1.18). Pure, no SDK, so the host tests run it (tests/host/test_oled_keys.cpp).
 //
 // A remote press is not a shortcut to "next screen": the injector holds a
@@ -17,7 +17,8 @@ namespace oledkeys {
 
 constexpr uint32_t kDebounceUs = 20000;
 constexpr uint32_t kLongPressUs = 1500000;  // KEY1 held longer = brightness cycle
-constexpr uint32_t kChordHoldUs = 1000000;  // KEY0 + KEY1 held this long = reboot
+constexpr uint32_t kFlipChordUs = 2000000;   // KEY0 + KEY1 held this long = 180-degree flip
+constexpr uint32_t kChordHoldUs = 5000000;   // KEY0 + KEY1 held this long = reboot
 // KEY0 held this long where the screen has a hold action (only the Status
 // screen with no controller: "pair now", src/pair_prompt.h) fires while still
 // held, and its release then does nothing. Longer than the app's remote long
@@ -33,6 +34,7 @@ enum Event : uint8_t {
     kBrightness = 0x08,  // KEY1 held past the long-press threshold: next brightness level
     kReboot = 0x10,      // KEY0 + KEY1 held kChordHoldUs
     kHold0 = 0x20,       // KEY0 held kHoldUs where the screen allows it (k0_hold)
+    kFlip = 0x40,        // KEY0 + KEY1 held kFlipChordUs: toggle 180-degree orientation
 };
 
 struct Buttons {
@@ -43,6 +45,7 @@ struct Buttons {
     bool k0_armed = false;       // KEY0 pressed, fires on release
     bool k1_armed = false;       // KEY1 pressed, pending short release or long hold
     bool k1_long_fired = false;  // brightness already changed during this press
+    bool chord_flip_fired = false; // the flip already fired during this chord
     uint32_t k1_press_us = 0;    // when KEY1 went down (short vs long)
     uint32_t chord_since_us = 0; // 0 = no chord held
 };
@@ -54,12 +57,21 @@ struct Buttons {
 inline uint8_t step(Buttons &b, bool k0_down, bool k1_down, uint32_t now, bool k0_hold = false) {
     uint8_t ev = 0;
     if (k0_down && k1_down) {
-        if (b.chord_since_us == 0) b.chord_since_us = now;
+        if (b.chord_since_us == 0) {
+            b.chord_since_us = now;
+            b.chord_flip_fired = false;
+        }
         b.k0_armed = false;
         b.k1_armed = false;
-        if ((now - b.chord_since_us) >= kChordHoldUs) ev |= kReboot;
+        const uint32_t held = now - b.chord_since_us;
+        if (!b.chord_flip_fired && held >= kFlipChordUs) {
+            b.chord_flip_fired = true;
+            ev |= kFlip | kActivity;
+        }
+        if (held >= kChordHoldUs) ev |= kReboot;
     } else {
         b.chord_since_us = 0;
+        b.chord_flip_fired = false;
     }
 
     if (k0_down && !b.k0_prev_down && (now - b.k0_t_us) > kDebounceUs) {

@@ -1,5 +1,10 @@
 #include "oled.h"
 #include "oled_font.h"
+#ifdef OLED_ZH
+#include "oled_zh_font.h"
+#include "home_zh.h"
+#include "ui_zh.h"
+#endif
 #include "oled_flush.h"
 #include "oled_keys.h"
 #include "oled_vpad.h"
@@ -7,6 +12,7 @@
 #include "title_scroll.h"
 #include "version_label.h"
 #include "bt.h"
+#include "ds4_protocol.h"
 #include "slots.h"
 #include "slots_footer.h"
 #include "pair_prompt.h"
@@ -70,6 +76,8 @@ constexpr int kRowBytes = kW / 8;
 constexpr int kFbBytes = kRowBytes * kH;
 
 uint8_t fb[kFbBytes];
+uint8_t fb_tx[kFbBytes];
+bool screen_flipped = false;
 // What the panel shows right now (a copy of fb at every flush), for the app's
 // screen mirror (0xEF). Main-loop only, like fb and the USB stack.
 uint8_t fb_shown[kFbBytes];
@@ -77,8 +85,8 @@ uint8_t fb_shown_seq = 0;
 
 uint32_t last_render_us = 0;
 constexpr uint32_t kFrameUs = 100000;
-// KEY0 / KEY1: the press logic (debounce, short / long, the KEY0+KEY1 reboot
-// chord) is oledkeys::step() in oled_keys.h, shared with the app's remote
+// KEY0 / KEY1: the press logic (debounce, short / long, the KEY0+KEY1 flip and
+// reboot chords) is oledkeys::step() in oled_keys.h, shared with the app's remote
 // presses (0xF6 0x18, protocol 1.18) and host-tested. KEY0 was once a
 // double-click reboot; that moved to the chord because rapid forward
 // navigation kept tripping it.
@@ -273,12 +281,17 @@ constexpr uint8_t kResendFrames = 20;
 uint8_t flushes_since_full = 0;
 void flush_fb_raw() {
     fb_shown_seq++;
+    const uint8_t *frame = fb;
+    if (screen_flipped) {
+        oled_flush::rotate_180(fb, fb_tx);
+        frame = fb_tx;
+    }
     const bool full = !panel_in_sync || ++flushes_since_full >= kResendFrames;
     if (full) flushes_since_full = 0;
-    if (!full && memcmp(fb_shown, fb, sizeof(fb_shown)) == 0) return;
+    if (!full && memcmp(fb_shown, frame, sizeof(fb_shown)) == 0) return;
     SpiSink sink;
-    oled_flush::stream_frame(fb, sink, full ? nullptr : fb_shown);
-    memcpy(fb_shown, fb, sizeof(fb_shown));
+    oled_flush::stream_frame(frame, sink, full ? nullptr : fb_shown);
+    memcpy(fb_shown, frame, sizeof(fb_shown));
     panel_in_sync = true;
 }
 
@@ -399,7 +412,7 @@ void draw_text_clipped(int x, int y, const char *s, int x_min, int x_max) {
 // build ("DS5 B. v0.9.5-dev.4", 19 characters) fits the 114 px between the
 // chrome strip and the link icon exactly.
 constexpr auto kVersionLabel = version_label::make("", FIRMWARE_VERSION);
-constexpr auto kStatusTitle = version_label::make("DS5 B. ", FIRMWARE_VERSION);
+constexpr auto kStatusTitle = version_label::make("DS4/5-monitor ", FIRMWARE_VERSION);
 
 // A title longer than its space (local builds, "+local.c3915e0") scrolls
 // ping-pong: one pixel per frame (100 ms, ~1.7 characters a second, the
@@ -429,10 +442,22 @@ void draw_button_chrome() {
 
 void draw_toast() {
     const char *msg = g_toast.current(time_us_64());
+    const char *pair = current_screen == kScreenStatus ? bt_pair_diagnostic() : nullptr;
+    static bool was_pair = false;
+    if (was_pair && !pair) ++fb_generation;
+    was_pair = pair != nullptr;
+    if (!msg) msg = pair;
     if (msg) {
+#ifdef OLED_ZH
+        rect_clear(6, 52, 122, 12);
+        oled_zh_home::draw(7, 52 + home_zh::font_offset(12), home_zh::notice(msg), 7, 52, 128, 64,
+                           [](int x, int y) { px(x, y, true); });
+        rect_invert(6, 52, 122, 12);
+#else
         rect_clear(oled_toast::kBarX, oled_toast::kBarY, oled_toast::kBarW, oled_toast::kBarH);
         draw_text(oled_toast::kTextX, oled_toast::kTextY, msg);
         rect_invert(oled_toast::kBarX, oled_toast::kBarY, oled_toast::kBarW, oled_toast::kBarH);
+#endif
     }
     // Diagnostics redraws only changed rows: after a toast, the whole screen.
     if (g_toast.take_ended()) ++fb_generation;
@@ -479,6 +504,10 @@ static const uint8_t kIconLinkOff[8] = {
 };
 
 void send_rumble(uint8_t amplitude) {
+    if (bt_is_ds4()) {
+        uint8_t p[31]{}; p[0] = 1; p[3] = p[4] = amplitude;
+        bt_ds4_output(p, sizeof(p)); return;
+    }
     uint8_t pkt[78] = {};
     pkt[0] = 0x31;
     pkt[1] = 0x00;
@@ -612,6 +641,13 @@ void handle_buttons() {
     if (ev == 0) return;
     if (ev & oledkeys::kActivity) last_activity_us = time_us_64();
     if (ev & oledkeys::kReboot) watchdog_reboot(0, 0, 0);
+    if (ev & oledkeys::kFlip) {
+        screen_flipped = !screen_flipped;
+        panel_in_sync = false;
+        flushes_since_full = 0;
+        last_render_us = 0;
+        if (!config_save_screen_flipped(screen_flipped)) oled_notice(oled_toast::kFlip);
+    }
     // KEY0 = next screen, KEY1 short = back. Trigger-preset / lightbar-mode
     // cycling lives on the DualSense triangle (triggers_handle_input(),
     // lightbar_handle_input()).
@@ -796,10 +832,30 @@ struct FbCanvas {
     void outline(int x, int y, int w, int h) { rect_outline(x, y, w, h); }
     void filled(int x, int y, int w, int h) { rect_filled(x, y, w, h); }
     void text(int x, int y, const char *s) { draw_text(x, y, s); }
+#ifdef OLED_ZH
+    int zh_width(const char *s) { return oled_zh::width(s); }
+    int zh_small_width(const char *s) { return oled_zh_home::width(s); }
+    void zh_text(int x, int y, const char *s, int x0, int y0, int x1, int y1) {
+        oled_zh::draw(x, y, s, x0, y0, x1, y1,
+                      [this](int px_x, int px_y) { px(px_x, px_y, true); });
+    }
+    void zh_small_text(int x, int y, const char *s, int x0, int y0, int x1, int y1) {
+        oled_zh_home::draw(x, y, s, x0, y0, x1, y1,
+                           [this](int px_x, int px_y) { px(px_x, px_y, true); });
+    }
+#endif
     void invert(int x, int y, int w, int h) { rect_invert(x, y, w, h); }
     void clear(int x, int y, int w, int h) { rect_clear(x, y, w, h); }
 };
 static_assert(oled_pad::kW == kW && oled_pad::kLeft >= kContentX, "glyph vs. screen / chrome");
+
+#ifdef OLED_ZH
+static void zh_line(int x, int y, const char *s, int x1 = 120) {
+    FbCanvas c;
+    c.zh_text(x, y + home_zh::font_offset(ui_zh::kLineH), s,
+              x, y, x1, y + ui_zh::kLineH);
+}
+#endif
 
 // The model comes from the colorway read at connect (cmd_controller_model,
 // the identity's [26]): 1 = Edge adds its Fn / back buttons; 0xFF (not known
@@ -828,11 +884,30 @@ __attribute__((noinline)) void render_screen() {
 
     // FIRMWARE_VERSION is set via CMake (the release tag, or a Git stamp for
     // dev builds); shown without "-oled-edition", scrolling if still too long.
+#ifdef OLED_ZH
+    {
+        const int cell = connected ? 12 : OLED_ROW_HEIGHT;
+        rect_clear(kContentX, 0, kW - kContentX, cell);
+        FbCanvas c;
+        c.zh_small_text(6, home_zh::font_offset(cell),
+                        home_zh::title(connected, interrupt_in_data[52], bt_pairing_seconds_left()),
+                        6, 0, 59, cell);
+        if (connected) {
+            int8_t rssi = 0;
+            const bool valid = bt_get_signal_strength(&rssi);
+            home_zh::signal_bar(c, valid, rssi);
+        } else {
+            draw_title_scrolling(60, 119, (cell - 7) / 2, kVersionLabel.s, kVersionLabel.n);
+        }
+        draw_icon(120, (cell - 8) / 2, connected ? kIconLinkOn : kIconLinkOff, 8, 8);
+    }
+#else
     if (force || kStatusTitle.n * 6 - 1 > 120 - kContentX) {
         rect_clear(kContentX, 0, kW - kContentX, 8);
         draw_title_scrolling(kContentX, 120, 0, kStatusTitle.s, kStatusTitle.n);
         draw_icon(120, 0, connected ? kIconLinkOn : kIconLinkOff, 8, 8);
     }
+#endif
 
     if (connected) {
         uint8_t a[6];
@@ -845,6 +920,11 @@ __attribute__((noinline)) void render_screen() {
             memcpy(last_addr, a, sizeof(a));
             last_pwr = pwr;
             last_eta = eta;
+#ifdef OLED_ZH
+            rect_clear(kContentX, 12, kW - kContentX, 18);
+            FbCanvas c;
+            home_zh::connected_details(c, a, pwr, {eta.charging, eta.valid, eta.provisional, eta.minutes});
+#else
             rect_clear(kContentX, 9, kW - kContentX, 17);
             char buf[24];
             snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X:%02X:%02X",
@@ -877,6 +957,7 @@ __attribute__((noinline)) void render_screen() {
                     snprintf(ebuf, sizeof(ebuf), "~--m");
                 draw_text(oled_pad::kEtaX, oled_pad::kBattY, ebuf);
             }
+#endif
         }
 
         // The controller glyph (src/oled_pad.h): sticks, L2/R2, L1/R1,
@@ -892,9 +973,14 @@ __attribute__((noinline)) void render_screen() {
         if (force || paired != last_paired || secs != last_secs) {
             last_paired = paired;
             last_secs = secs;
-            rect_clear(kContentX, 9, kW - kContentX, kH - 9);
             FbCanvas c;
+#ifdef OLED_ZH
+            rect_clear(kContentX, OLED_ROW_HEIGHT, kW - kContentX, kH - OLED_ROW_HEIGHT);
+            home_zh::disconnected_details(c, paired, secs);
+#else
+            rect_clear(kContentX, 9, kW - kContentX, kH - 9);
             pair_prompt::draw(c, paired, secs);
+#endif
         }
     }
 
@@ -903,6 +989,24 @@ __attribute__((noinline)) void render_screen() {
 
 __attribute__((noinline)) void render_screen_rssi() {
     fb_clear();
+#ifdef OLED_ZH
+    zh_line(6, 0, ui_zh::kRssiTitle);
+    if (bt_is_connected()) {
+        int8_t rssi = 0;
+        const bool valid = bt_get_signal_strength(&rssi);
+        char buf[32];
+        ui_zh::rssi_value(buf, sizeof(buf), valid, rssi);
+        zh_line(6, 12, buf);
+        if (valid && rssi == 0) zh_line(6, 24, ui_zh::kInRange);
+        rect_outline(6, 36, signal_screen::kBarW, signal_screen::kBarH);
+        const int fill = valid ? signal_screen::bar_fill(rssi) : 0;
+        if (fill > 0) rect_filled(8, 38, fill, signal_screen::kBarH - 4);
+        ui_zh::rssi_link(buf, sizeof(buf), valid, rssi);
+        zh_line(6, 48, buf);
+    } else {
+        zh_line(6, 30, ui_zh::kNoController);
+    }
+#else
     draw_text(kContentX, 0, "BT Signal");
     if (bt_is_connected()) {
         // dB from the golden range (0 = in it), not dBm; src/signal_screen.h.
@@ -914,6 +1018,7 @@ __attribute__((noinline)) void render_screen_rssi() {
     } else {
         draw_text(kContentX, 30, "(no controller)");
     }
+#endif
     flush_fb();
 }
 
@@ -921,7 +1026,7 @@ __attribute__((noinline)) void render_screen_rssi() {
 // D-pad up/down. No cursor — there's nothing to select.
 int   diag_scroll = 0;
 uint8_t diag_last_dpad = 8; // edge-trigger N/E/S/W like settings_handle_input
-constexpr int kDiagVisible = 5;
+constexpr int kDiagVisible = 4;
 
 // Per-second rates sampled once per render, shared across format_diag_row's
 // rate-based rows so they stay in sync.
@@ -959,9 +1064,54 @@ void sample_diag_rates() {
 
 // Row list ordered by relevance: always-useful at top, parked-mic-investigation
 // data at bottom. To add a row, bump kNumDiagRows and add a case.
-constexpr int kNumDiagRows = 17;
+constexpr int kNumDiagRows = 20;
+static void format_ds4_diag_row(int idx, char *line, size_t n) {
+    const Ds4AudioDiag d = ds4_audio_diagnostics();
+    switch (idx) {
+        case 17: snprintf(line, n, "D4 U%lu P%lu E%lu", (unsigned long)d.usb_frames,
+                          (unsigned long)d.pcm_blocks, (unsigned long)d.encoded); break;
+        case 18: snprintf(line, n, "D4 Q%lu X%lu D%lu", (unsigned long)d.queued,
+                          (unsigned long)d.queue_errors, (unsigned long)d.pcm_drops); break;
+        case 19: snprintf(line, n, "D4 t%02X a%u c%u", d.target, d.amp, d.encoder_state); break;
+        default: line[0] = '\0'; break;
+    }
+}
+#ifdef OLED_ZH
+__attribute__((noinline))
+void format_diag_row_zh(int idx, char* line, size_t n) {
+    switch (idx) {
+        case 0: ui_zh::diag_uptime(line, n, time_us_64()); break;
+        case 1: snprintf(line, n, "%s", ui_zh::diag_bt_state(bt_is_connected())); break;
+        case 2: ui_zh::diag_host02(line, n, host_out02_total()); break;
+        case 3: ui_zh::diag_trig_tx(line, n, host_out02_trig_allow(), host_out02_to_bt()); break;
+        case 4: ui_zh::diag_drops(line, n, audio_fifo_drops(), opus_fifo_drops(), audio_hap_drops()); break;
+        case 5: ui_zh::diag_rate(line, n, "蓝牙输入31:", g_diag_rates.bt31_rate); break;
+        case 6: ui_zh::diag_rate(line, n, "USB音频:", g_diag_rates.usb_rate); break;
+        case 7: ui_zh::diag_rate(line, n, "蓝牙输出32:", g_diag_rates.bt_rate); break;
+        case 8: ui_zh::diag_rate(line, n, "麦克风输入:", g_diag_rates.mic_rate); break;
+        case 9: ui_zh::diag_mic_dec(line, n, audio_mic_last_decoded(), audio_mic_last_wrote()); break;
+        case 10: ui_zh::diag_mic_plc(line, n, audio_mic_plc_frames()); break;
+        case 11: {
+            uint8_t pfx[6]; bt_31_mic_prefix(pfx);
+            snprintf(line, n, "%02X %02X %02X %02X %02X %02X",
+                     pfx[0], pfx[1], pfx[2], pfx[3], pfx[4], pfx[5]);
+            break;
+        }
+        case 12: ui_zh::diag_c1(line, n, audio_c1_loops(), audio_c1_enc()); break;
+        case 13: ui_zh::diag_pushes(line, n, audio_raw_push(), audio_hap_push()); break;
+        case 14: ui_zh::diag_bt_drop(line, n, bt_send_drops()); break;
+        case 15: ui_zh::diag_mic_lost(line, n, audio_mic_in_drops(), audio_mic_buf_drops(), audio_mic_underruns()); break;
+        case 16: ui_zh::diag_usb_ovr(line, n, audio_usb_out_overruns()); break;
+        case 17: case 18: case 19: format_ds4_diag_row(idx, line, n); break;
+        default: line[0] = '\0'; break;
+    }
+}
+#endif
 __attribute__((noinline))
 void format_diag_row(int idx, char* line, size_t n) {
+#ifdef OLED_ZH
+    format_diag_row_zh(idx, line, n);
+#else
     // Each row fits 19 glyphs; counters that can outgrow that go compact (k/M/G, src/diag_rows.h).
     switch (idx) {
         case 0:
@@ -1025,10 +1175,14 @@ void format_diag_row(int idx, char* line, size_t n) {
             // The PC's speaker FIFO found full or overrun (TinyUSB overwrote audio).
             diag_rows::count(line, n, "USB ovr: ", audio_usb_out_overruns());
             break;
+        case 17: case 18: case 19:
+            format_ds4_diag_row(idx, line, n);
+            break;
         default:
             line[0] = '\0';
             break;
     }
+#endif
 }
 
 void diag_handle_input(int visible) {
@@ -1046,35 +1200,43 @@ void diag_handle_input(int visible) {
 
 __attribute__((noinline)) void render_screen_diag() {
     static uint32_t seen_generation = ~0u;
-    static char last_row[kDiagVisible][20]{};
+    static char last_row[kDiagVisible][64]{};
     static uint8_t last_markers = 0xff;
     const bool force = seen_generation != fb_generation;
     if (force) {
         fb_clear();
+#ifdef OLED_ZH
+        zh_line(6, 0, ui_zh::kDiagTitle);
+#else
         draw_text(kContentX, 0, "Diagnostics");
+#endif
         seen_generation = fb_generation;
     }
 
     sample_diag_rates();
 
-    char line[diag_rows::kGlyphs + 1]; // 19 glyphs fit before the scroll markers at x=120
+    char line[64];
     // loop: HOT-PATH-OK — N = kDiagVisible = 5 visible rows at 10 Hz, unchanged strings skip drawing
     for (int i = 0; i < kDiagVisible; i++) {
         if (diag_scroll + i < kNumDiagRows) format_diag_row(diag_scroll + i, line, sizeof(line));
         else line[0] = '\0';
         if (!force && strcmp(last_row[i], line) == 0) continue;
-        const int y = 9 + i * 9;
-        rect_clear(kContentX, y, 113, 9);
+        const int y = 12 + i * 12;
+        rect_clear(kContentX, y, 113, 12);
+#ifdef OLED_ZH
+        zh_line(6, y, line);
+#else
         draw_text(kContentX, y, line);
+#endif
         strcpy(last_row[i], line);
     }
 
     const uint8_t markers = (diag_scroll > 0 ? 1 : 0)
         | (diag_scroll + kDiagVisible < kNumDiagRows ? 2 : 0);
     if (force || markers != last_markers) {
-        rect_clear(120, 9, 8, 45);
-        if (markers & 1) draw_text(120, 9, "^");
-        if (markers & 2) draw_text(120, 45, "v");
+        rect_clear(120, 12, 8, 49);
+        if (markers & 1) draw_text(120, 12, "^");
+        if (markers & 2) draw_text(120, 54, "v");
         last_markers = markers;
     }
 
@@ -1083,15 +1245,23 @@ __attribute__((noinline)) void render_screen_diag() {
 
 __attribute__((noinline)) void render_screen_cpu() {
     fb_clear();
+#ifndef OLED_ZH
     draw_text(kContentX, 0, "CPU / Clock");
+#endif
 
-    char buf[24];
+    char buf[64];
 
     // Configured system clock — compile-time SYS_CLOCK_KHZ, set in main()
     // via set_sys_clock_khz(). This is the *target*.
     const uint32_t set_khz = (uint32_t)SYS_CLOCK_KHZ;
+#ifdef OLED_ZH
+    zh_line(6, 0, ui_zh::kCpuTitle);
+    ui_zh::cpu_set(buf, sizeof(buf), set_khz);
+    zh_line(6, 12, buf);
+#else
     snprintf(buf, sizeof(buf), "Set : %lu MHz", (unsigned long)(set_khz / 1000u));
     draw_text(kContentX, 12, buf);
+#endif
 
     // Actually running clk_sys, measured by the on-chip frequency counter
     // against the crystal reference (not just what we asked for). The counter
@@ -1099,21 +1269,38 @@ __attribute__((noinline)) void render_screen_cpu() {
     // once for the whole run, shared with the app's 0xFC (measured_clk_khz,
     // cache pass batch 5; this screen used to re-measure on every entry).
     const uint32_t real_khz = measured_clk_khz();
+#ifdef OLED_ZH
+    ui_zh::cpu_real(buf, sizeof(buf), real_khz);
+    zh_line(6, 24, buf);
+#else
     snprintf(buf, sizeof(buf), "Real: %lu.%01lu MHz",
              (unsigned long)(real_khz / 1000u),
              (unsigned long)((real_khz % 1000u) / 100u));
     draw_text(kContentX, 22, buf);
+#endif
 
     // Core voltage actually programmed into the regulator, read back (not the
     // compile-time constant). Codes 0..15 are linear 0.05 V steps from 0.55 V.
     const int vcode = (int)vreg_get_voltage();
     if (vcode >= 0 && vcode <= 0b01111) {
         const unsigned mv = 550u + 50u * (unsigned)vcode;
+#ifdef OLED_ZH
+        ui_zh::cpu_vcore(buf, sizeof(buf), mv);
+#else
         snprintf(buf, sizeof(buf), "Vcore: %u.%02u V", mv / 1000u, (mv % 1000u) / 10u);
+#endif
     } else {
+#ifdef OLED_ZH
+        ui_zh::cpu_vcode(buf, sizeof(buf), vcode);
+#else
         snprintf(buf, sizeof(buf), "Vcore: code %d", vcode);
+#endif
     }
+#ifdef OLED_ZH
+    zh_line(6, 36, buf);
+#else
     draw_text(kContentX, 32, buf);
+#endif
 
     // RP2350 on-die temperature sensor. Smoothed + averaged in cmd.cpp
     // (single source of truth shared with the 0xfc web telemetry) so the
@@ -1122,9 +1309,14 @@ __attribute__((noinline)) void render_screen_cpu() {
     const float volts = (float)raw * 3.3f / 4096.0f;
     const float temp_c = 27.0f - (volts - 0.706f) / 0.001721f;
     const int t10 = (int)(temp_c * 10.0f + (temp_c >= 0 ? 0.5f : -0.5f));
+#ifdef OLED_ZH
+    ui_zh::cpu_temp(buf, sizeof(buf), t10);
+    zh_line(6, 48, buf);
+#else
     snprintf(buf, sizeof(buf), "Temp : %d.%d C", t10 / 10,
              (t10 < 0 ? -t10 : t10) % 10);
     draw_text(kContentX, 42, buf);
+#endif
 
     flush_fb();
 }
@@ -1147,17 +1339,28 @@ void triggers_handle_input() {
 
 __attribute__((noinline)) void render_screen_triggers() {
     fb_clear();
+#ifdef OLED_ZH
+    zh_line(6, 0, ui_zh::kTriggersTitle);
+    char buf[64];
+    ui_zh::trigger_mode(buf, sizeof(buf), trigger_preset);
+    zh_line(6, 12, buf);
+#else
     draw_text(kContentX, 0, "Trigger Test");
 
     char buf[24];
     snprintf(buf, sizeof(buf), "Mode: %s", kTrigPresetNames[trigger_preset]);
     draw_text(kContentX, 12, buf);
+#endif
 
     if (bt_is_connected()) {
         const uint8_t l2 = interrupt_in_data[4];
         const uint8_t r2 = interrupt_in_data[5];
         snprintf(buf, sizeof(buf), "L2:%3d  R2:%3d", l2, r2);
+#ifdef OLED_ZH
+        zh_line(6, 24, buf);
+#else
         draw_text(kContentX, 24, buf);
+#endif
 
         rect_outline(kContentX, 35, 56, 9);
         int lfill = (l2 * 52) / 255;
@@ -1166,10 +1369,18 @@ __attribute__((noinline)) void render_screen_triggers() {
         int rfill = (r2 * 52) / 255;
         if (rfill > 0) rect_filled(74, 37, rfill, 5);
     } else {
+#ifdef OLED_ZH
+        zh_line(6, 24, ui_zh::kNoController);
+#else
         draw_text(kContentX, 24, "(no controller)");
+#endif
     }
 
+#ifdef OLED_ZH
+    zh_line(6, 52, ui_zh::kTriggerFooter);
+#else
     draw_text(kContentX, 56, "Tri=cycle");
+#endif
     flush_fb();
 }
 
@@ -1242,6 +1453,7 @@ void imu_cal_service() {
     // lifetime: OK — no heap until 0x05 arrives (empty vector), then one copy per connection (g_imu_cal_tried)
     auto d = bt_peek_feature(0x05);
     if (d.size() < 35) return;                 // not arrived yet — retry next frame
+    if (bt_is_ds4() && d.size() >= 37) ds4::calibration(d.data()+1, d.data()+1);
     imu_cal_parse(d);
     g_imu_cal_tried = true;
 }
@@ -1256,7 +1468,11 @@ inline int16_t imu_apply(int index, int16_t raw) {
 
 __attribute__((noinline)) void render_screen_gyro() {
     fb_clear();
+#ifdef OLED_ZH
+    zh_line(6, 0, ui_zh::kGyroTitle);
+#else
     draw_text(kContentX, 0, "Gyro Tilt");
+#endif
     if (bt_is_connected()) {
         int16_t ax, ay, az;
         memcpy(&ax, &interrupt_in_data[21], 2);
@@ -1266,9 +1482,9 @@ __attribute__((noinline)) void render_screen_gyro() {
         ay = imu_apply(4, ay);
         az = imu_apply(5, az);
         char buf[16];
-        snprintf(buf, sizeof(buf), "X%+5d", ax); draw_text(kContentX, 10, buf);
-        snprintf(buf, sizeof(buf), "Y%+5d", ay); draw_text(50, 10, buf);
-        snprintf(buf, sizeof(buf), "Z%+5d", az); draw_text(94, 10, buf);
+        snprintf(buf, sizeof(buf), "X%+5d", ax); draw_text(kContentX, 12, buf);
+        snprintf(buf, sizeof(buf), "Y%+5d", ay); draw_text(50, 12, buf);
+        snprintf(buf, sizeof(buf), "Z%+5d", az); draw_text(94, 12, buf);
 
         const int bx = 44, by = 22, bw = 40, bh = 40;
         rect_outline(bx, by, bw, bh);
@@ -1293,14 +1509,22 @@ __attribute__((noinline)) void render_screen_gyro() {
         if (cy > by + bh - 3) cy = by + bh - 3;
         rect_filled(cx - 1, cy - 1, 3, 3);
     } else {
+#ifdef OLED_ZH
+        zh_line(6, 30, ui_zh::kNoController);
+#else
         draw_text(kContentX, 30, "(no controller)");
+#endif
     }
     flush_fb();
 }
 
 __attribute__((noinline)) void render_screen_touchpad() {
     fb_clear();
+#ifdef OLED_ZH
+    zh_line(6, 0, ui_zh::kTouchpadTitle);
+#else
     draw_text(kContentX, 0, "Touchpad");
+#endif
     if (bt_is_connected()) {
         rect_outline(kContentX + 2, 12, 116, 30);
         int active = 0;
@@ -1316,7 +1540,7 @@ __attribute__((noinline)) void render_screen_touchpad() {
             const uint16_t fx = (f >> 8) & 0xFFFu;
             const uint16_t fy = (f >> 20) & 0xFFFu;
             int sx = (kContentX + 3) + ((int)fx * 110) / 1919;
-            int sy = 13 + ((int)fy * 26) / 1079;
+            int sy = 13 + ((int)fy * 26) / (bt_is_ds4() ? 941 : 1079);
             if (sx < kContentX + 3)   sx = kContentX + 3;
             if (sx > 122) sx = 122;
             if (sy < 13)  sy = 13;
@@ -1324,16 +1548,29 @@ __attribute__((noinline)) void render_screen_touchpad() {
             rect_filled(sx - 1, sy - 1, 3, 3);
             active++;
         }
-        char buf[20];
+        char buf[32];
+#ifdef OLED_ZH
+        ui_zh::touchpad_fingers(buf, sizeof(buf), active);
+        zh_line(6, 46, buf);
+#else
         snprintf(buf, sizeof(buf), "Fingers: %d", active);
         draw_text(kContentX, 46, buf);
+#endif
     } else {
+#ifdef OLED_ZH
+        zh_line(6, 30, ui_zh::kNoController);
+#else
         draw_text(kContentX, 30, "(no controller)");
+#endif
     }
     flush_fb();
 }
 
 void send_lightbar_color(uint8_t r, uint8_t g, uint8_t b) {
+    if (bt_is_ds4()) {
+        uint8_t p[31]{}; p[0] = 2; p[5] = r; p[6] = g; p[7] = b;
+        bt_ds4_output(p, sizeof(p)); return;
+    }
     uint8_t pkt[78] = {};
     pkt[0] = 0x31;
     pkt[2] = 0x10;
@@ -1422,6 +1659,29 @@ void lightbar_handle_input() {
 
 __attribute__((noinline)) void render_screen_lightbar() {
     fb_clear();
+#ifdef OLED_ZH
+    zh_line(6, 0, ui_zh::kLightbarTitle);
+    const char *tag = ui_zh::lightbar_tag(lb_mode);
+    const int tag_x = 126 - oled_zh_home::width(tag);
+    zh_line(tag_x, 0, tag, 128);
+
+    if (bt_is_connected()) {
+        char buf[32];
+        snprintf(buf, sizeof(buf), "红%3u", lb_r); zh_line(6, 12, buf);
+        snprintf(buf, sizeof(buf), "绿%3u", lb_g); zh_line(48, 12, buf);
+        snprintf(buf, sizeof(buf), "蓝%3u", lb_b); zh_line(90, 12, buf);
+
+        const int by = 24, bh = 8;
+        rect_outline(kContentX,  by, 38, bh); int rf = (lb_r * 34) / 255; if (rf > 0) rect_filled(kContentX + 2,  by + 2, rf, bh - 4);
+        rect_outline(48, by, 38, bh); int gf = (lb_g * 34) / 255; if (gf > 0) rect_filled(50, by + 2, gf, bh - 4);
+        rect_outline(90, by, 38, bh); int bf = (lb_b * 34) / 255; if (bf > 0) rect_filled(92, by + 2, bf, bh - 4);
+
+        zh_line(6, 36, ui_zh::kLightbarSaveHint);
+        zh_line(6, 48, ui_zh::lightbar_hint(lb_mode));
+    } else {
+        zh_line(6, 30, ui_zh::kNoController);
+    }
+#else
     draw_text(kContentX, 0, "Lightbar");
     draw_text(86, 0, lb_mode_tag(lb_mode));
 
@@ -1454,6 +1714,7 @@ __attribute__((noinline)) void render_screen_lightbar() {
         draw_text(kContentX, 30, "(no controller)");
     }
     draw_text(kContentX, 56, "R1=mode");
+#endif
     flush_fb();
 }
 
@@ -1579,6 +1840,29 @@ void lightbar_save_config() {
 
 __attribute__((noinline)) void render_screen_vu() {
     fb_clear();
+#ifdef OLED_ZH
+    zh_line(6, 0, ui_zh::kVuTitle);
+    if (bt_is_connected()) {
+        const uint8_t spk = audio_peak_speaker();
+        const uint8_t hap = audio_peak_haptic();
+        char buf[32];
+        ui_zh::vu_speaker(buf, sizeof(buf), spk);
+        zh_line(6, 12, buf);
+        rect_outline(56, 12, 68, 8);
+        int sfill = (spk * 64) / 255;
+        if (sfill > 0) rect_filled(58, 14, sfill, 4);
+
+        ui_zh::vu_haptic(buf, sizeof(buf), hap);
+        zh_line(6, 28, buf);
+        rect_outline(56, 28, 68, 8);
+        int hfill = (hap * 64) / 255;
+        if (hfill > 0) rect_filled(58, 30, hfill, 4);
+
+        zh_line(6, 44, ui_zh::kVuFooter);
+    } else {
+        zh_line(6, 30, ui_zh::kNoController);
+    }
+#else
     draw_text(kContentX, 0, "Audio Meters");
     if (bt_is_connected()) {
         const uint8_t spk = audio_peak_speaker();
@@ -1600,10 +1884,12 @@ __attribute__((noinline)) void render_screen_vu() {
     } else {
         draw_text(kContentX, 30, "(no controller)");
     }
+#endif
     flush_fb();
 }
 
 void settings_adjust(int delta) {
+    if (bt_is_ds4() && !settings_menu::ds4_item_supported(settings_nav.item())) return;
     settings_dirty = true;
     settings_menu::adjust(settings_menu::kItems[settings_nav.item()], settings_local, settings_power, delta);
 }
@@ -1631,13 +1917,31 @@ void settings_handle_input() {
             settings_power = config_power_flags();
             lightbar_load_config(); // refresh RAM lightbar state (no reboot here)
             settings_dirty = false;
-            settings_show_status("Reset!");
+            settings_show_status(
+#ifdef OLED_ZH
+                "已恢复默认"
+#else
+                "Reset!"
+#endif
+            );
         } else {
-            settings_show_status("Reset FAIL");
+            settings_show_status(
+#ifdef OLED_ZH
+                "恢复失败"
+#else
+                "Reset FAIL"
+#endif
+            );
         }
     } else if (s.action == settings_menu::kWipe) {
         // error: SHOWN — OLED footer "Wipe FAIL" (fixed in this pass: always said "Slots wiped!")
-        settings_show_status(bt_wipe_all_slots() ? "Slots wiped!" : "Wipe FAIL");
+        settings_show_status(bt_wipe_all_slots() ?
+#ifdef OLED_ZH
+                             "配对已清空" : "清空失败"
+#else
+                             "Slots wiped!" : "Wipe FAIL"
+#endif
+        );
     } else if (s.action == settings_menu::kSave) {
         // Only this screen's fields from its copy: the lightbar, the
         // slot, brightness and the narrator keep their live values.
@@ -1647,7 +1951,13 @@ void settings_handle_input() {
         config_set_power_flags(settings_power);
         // error: SHOWN — OLED footer "Reset FAIL" / "Save FAIL"
         const bool saved = config_save();
-        settings_show_status(saved ? "Saved!" : "Save FAIL");
+        settings_show_status(saved ?
+#ifdef OLED_ZH
+                             "已保存" : "保存失败"
+#else
+                             "Saved!" : "Save FAIL"
+#endif
+        );
         if (saved) settings_dirty = false;  // a failed save keeps the (*) marker
     }
 }
@@ -1657,7 +1967,7 @@ __attribute__((noinline)) void render_screen_settings() {
     const bool status_live = settings_save_status[0]
         && (int32_t)(time_us_32() - settings_status_until_us) < 0;
     const settings_menu::View v{settings_local, settings_power, get_config(), config_power_flags(),
-                                settings_dirty, status_live ? settings_save_status : nullptr};
+                                settings_dirty, status_live ? settings_save_status : nullptr, bt_is_ds4()};
     FbCanvas c;
     settings_menu::draw(c, settings_nav, v);
     flush_fb();
@@ -1697,7 +2007,11 @@ void slots_handle_input() {
     if (tri_now && !tri_prev) {
         if (slots_cursor != bt_get_slot()) {
             // error: SHOWN — OLED Slots status "Save FAIL" / "Wipe FAIL" (fixed in this pass: always said done)
+#ifdef OLED_ZH
+            slots_status = bt_set_slot(slots_cursor) ? ui_zh::kSwitched : ui_zh::kSwitchFail;
+#else
             slots_status = bt_set_slot(slots_cursor) ? "Switched!" : "Save FAIL";
+#endif
             slots_status_until_us = (uint32_t)time_us_32() + 1500000;
         }
     }
@@ -1713,7 +2027,11 @@ void slots_handle_input() {
         && ((uint32_t)time_us_32() - slots_sq_press_us) >= kSlotsWipeHoldUs) {
         slots_wipe_triggered = true;
         // error: SHOWN — OLED Slots status "Save FAIL" / "Wipe FAIL" (fixed in this pass: always said done)
+#ifdef OLED_ZH
+        slots_status = bt_forget_slot(slots_cursor) ? ui_zh::kWiped : ui_zh::kWipeFail;
+#else
         slots_status = bt_forget_slot(slots_cursor) ? "Wiped!" : "Wipe FAIL";
+#endif
         slots_status_until_us = (uint32_t)time_us_32() + 1500000;
     }
     if (!sq_now && sq_prev) slots_wipe_triggered = false;
@@ -1728,32 +2046,44 @@ __attribute__((noinline)) void render_screen_slots() {
     char hdr[32];  // room for any int slot (gcc -Wformat-truncation=2)
     const int active = bt_get_slot();
     const bool conn = bt_is_connected();
+    const bool status_live = slots_status[0]
+        && (int32_t)(time_us_32() - slots_status_until_us) < 0;
+#ifdef OLED_ZH
+    ui_zh::slots_header(hdr, sizeof(hdr), active, conn);
+    zh_line(6, 0, status_live ? slots_status : hdr);
+#else
     snprintf(hdr, sizeof(hdr), "Slots        [s%d %s]", active, conn ? "ON" : "--");
     draw_text(kContentX, 0, hdr);
+#endif
 
     // loop: HOT-PATH-OK — kNumSlots = 4 rows, slots screen at 10 Hz
     for (int i = 0; i < kNumSlots; i++) {
-        char line[28];
+        char line[64];
         const char *cursor_mark = (i == slots_cursor) ? ">" : " ";
         const char *active_mark = (i == active) ? "*" : " ";
         if (slot_occupied(i)) {
             uint8_t a[6];
             slot_get_addr(i, a);
-            snprintf(line, sizeof(line), "%s%d%s%02X:%02X:%02X:%02X:%02X:%02X",
+            snprintf(line, sizeof(line), "%s%d%s %02X%02X%02X%02X%02X%02X",
                      cursor_mark, i, active_mark, a[0], a[1], a[2], a[3], a[4], a[5]);
         } else {
+#ifdef OLED_ZH
+            snprintf(line, sizeof(line), "%s%d%s %s", cursor_mark, i, active_mark, ui_zh::kEmpty);
+#else
             snprintf(line, sizeof(line), "%s%d%s (empty)", cursor_mark, i, active_mark);
+#endif
         }
+#ifdef OLED_ZH
+        zh_line(6, 12 + i * 12, line);
+#else
         draw_text(kContentX, 9 + i * 9, line);
+#endif
     }
 
-    const bool status_live = slots_status[0]
-        && (int32_t)(time_us_32() - slots_status_until_us) < 0;
-    // Tri / Square are the controller's buttons: with none connected, say
-    // what does work (PS on a paired controller switches to its slot), or,
-    // with every slot taken, why a new controller can't pair.
+#ifndef OLED_ZH
     draw_text(kContentX, 56, slots_footer::pick(status_live ? slots_status : nullptr,
                                                 conn, !slots_any_empty()));
+#endif
     flush_fb();
 }
 
@@ -1767,12 +2097,21 @@ static uint32_t s_splash_since_us = 0;
 
 void boot_splash() {
     fb_clear();
+#ifdef OLED_ZH
+    FbCanvas c;
+    const char *name = ui_zh::kProjectName;
+    const int x = (128 - c.zh_small_width(name)) / 2;
+    c.zh_text(x, 12 + home_zh::font_offset(12), name, 6, 12, 128, 24);
+    draw_text(6, 30, kVersionLabel.s);
+    c.zh_text(6, 44 + home_zh::font_offset(ui_zh::kLineH),
+              ui_zh::kBootBoard, 6, 44, 128, 56);
+#else
     auto cx_for = [](const char* s) {
         // loop: NOT-WORTH — strlen of 3 splash lines, boot-only
         int n = 0; while (s[n]) n++;
         return (128 - (n * 6 - 1)) / 2;
     };
-    const char* l1 = "DS5 Bridge";
+    const char* l1 = "DS4/5-monitor";
     const char* l2 = kVersionLabel.s;  // was a stale hard-coded "v0.6.0"
     const char* l3 = DS5_BOARD_NAME " + OLED";
     draw_text(cx_for(l1), 16, l1);
@@ -1781,6 +2120,7 @@ void boot_splash() {
     const int cx2 = (128 - (kVersionLabel.n * 6 - 1)) / 2;
     draw_text(cx2 < 0 ? 0 : cx2, 30, l2);
     draw_text(cx_for(l3), 44, l3);
+#endif
     flush_fb();
     s_splash_since_us = time_us_32();
     s_splash_hold = true;
@@ -1803,7 +2143,7 @@ void screen_input_tick() {
     switch (current_screen) {
         case kScreenSlots: slots_handle_input(); break;
         case kScreenLightbar: lightbar_handle_input(); break;
-        case kScreenTriggers: triggers_handle_input(); break;
+        case kScreenTriggers: if (!bt_is_ds4()) triggers_handle_input(); break;
         case kScreenDiag: diag_handle_input(kDiagVisible); break;
         case kScreenSettings:
             if (!settings_init_done) {
@@ -1866,6 +2206,7 @@ static bool panel_start() {
     gpio_init(kPinKey0); gpio_set_dir(kPinKey0, GPIO_IN); gpio_pull_up(kPinKey0);
     gpio_init(kPinKey1); gpio_set_dir(kPinKey1, GPIO_IN); gpio_pull_up(kPinKey1);
 
+    screen_flipped = config_screen_flipped();
     hw_reset();
     sh1107_init();
     panel_in_sync = false;
@@ -1878,9 +2219,17 @@ void oled_fault(const char *l1, const char *l2, const char *l3) {
     // error: NOT-WORTH — display "none": nowhere to show it (the board stays stopped either way)
     if (!panel_start()) return;
     fb_clear();
+#ifdef OLED_ZH
+    FbCanvas c;
+    const int dy = home_zh::font_offset(ui_zh::kLineH);
+    c.zh_text(6, 16 + dy, l1, 6, 16, 122, 28);
+    c.zh_text(6, 30 + dy, l2, 6, 30, 122, 42);
+    c.zh_text(6, 44 + dy, l3, 6, 44, 122, 56);
+#else
     draw_text(0, 16, l1);
     draw_text(0, 28, l2);
     draw_text(0, 40, l3);
+#endif
     flush_fb_raw();
 }
 
@@ -1934,8 +2283,17 @@ void render_dim_pulse(uint32_t dim_elapsed_us) {
 // the dongle can't write the stale copy over the host's changes.
 static void sync_host_config_changes() {
     static uint32_t seen_gen = 0;
+    static uint32_t seen_profile = 0;
     const uint32_t gen = cmd_host_config_gen();
-    if (gen == seen_gen) return;
+    const uint32_t profile = config_profile_generation();
+    if (gen == seen_gen && profile == seen_profile) return;
+    if (profile != seen_profile) {
+        // Do not apply the previous controller's edited menu snapshot or
+        // a partly-held save/reset gesture to a newly selected controller.
+        settings_nav = settings_menu::Nav{};
+        settings_save_status = "";
+    }
+    seen_profile = profile;
     seen_gen = gen;
     lightbar_load_config();
     bright_idx = get_config().screen_brightness;
@@ -1980,7 +2338,24 @@ __attribute__((noinline)) bool identify_frame() {
     oled_power_state = OLED_ACTIVE;
     memset(fb, 0, sizeof(fb));
     FbCanvas c;
+#ifdef OLED_ZH
+    c.outline(0, 0, 128, 64);
+    c.outline(2, 2, 124, 60);
+    const char *title = ui_zh::kIdentifyTitle;
+    const int tx = (128 - oled_zh_home::width(title)) / 2;
+    c.zh_text(tx, 14 + home_zh::font_offset(ui_zh::kLineH),
+              title, 4, 14, 124, 26);
+    if (DS5_BOARD_NAME[0])
+        identify::text_scaled(c, identify::centered_x(DS5_BOARD_NAME, 1), 32, DS5_BOARD_NAME, 1);
+    char slot[16];
+    ui_zh::identify_slot(slot, sizeof(slot), (uint8_t) bt_get_slot());
+    const int sx = (128 - oled_zh_home::width(slot)) / 2;
+    c.zh_text(sx, 46 + home_zh::font_offset(ui_zh::kLineH),
+              slot, 4, 46, 124, 58);
+    if (inv) c.invert(0, 0, 128, 64);
+#else
     identify::draw(c, DS5_BOARD_NAME, (uint8_t) bt_get_slot(), inv);
+#endif
     flush_fb_raw();  // no chrome strip: nothing to navigate while it shows
     return true;
 }
@@ -2086,7 +2461,7 @@ void oled_loop() {
     // stays active on the DS5 indefinitely, which surprised users
     // who'd just navigated away expecting a clean slate.
     if (last_rendered_screen == kScreenTriggers
-        && current_screen != kScreenTriggers) {
+        && current_screen != kScreenTriggers && !bt_is_ds4()) {
         trigger_preset = 0;
         send_trigger_effect(0);
     }
@@ -2101,6 +2476,17 @@ void oled_loop() {
 
     last_rendered_screen = current_screen;
 
+    if (bt_is_ds4() && (current_screen == kScreenTriggers || current_screen == kScreenVU)) {
+        fb_clear();
+        draw_text(6, 4, "DS4");
+#ifdef OLED_ZH
+        zh_line(6, 24, current_screen == kScreenVU ? "音频: 关" : "扳机效果: 关");
+#else
+        draw_text(6, 24, "Unavailable");
+#endif
+        flush_fb();
+        return;
+    }
     switch (current_screen) {
         case kScreenStatus:   render_screen();           break;
         case kScreenSlots:    render_screen_slots();     break;

@@ -2,8 +2,10 @@
 // Modeled on zurce/DS5Dongle-OLED (bt.cpp:29-115). Credit to zurce.
 
 #include "slots.h"
+#include "config.h"
 
 #include <cstring>
+#include <cstddef>
 #include <cstdio>
 
 #include "hardware/flash.h"
@@ -17,12 +19,33 @@ struct __attribute__((packed)) SlotsData {
     uint32_t magic;
     uint8_t  addrs[kNumSlots][6];
     uint8_t  occupied[kNumSlots];
+    // Append only: home11 reads the original 32-byte prefix unchanged.
+    uint32_t kind_magic;
+    uint8_t kind[kNumSlots];
+    uint32_t generation_magic;
+    uint32_t generation[kNumSlots];
 };
 
 static_assert(sizeof(SlotsData) <= FLASH_PAGE_SIZE);
+static_assert(offsetof(SlotsData, kind_magic) == 32, "home11 slots prefix must stay unchanged");
+static_assert(offsetof(SlotsData, generation_magic) == 40, "exp9 slots prefix must stay unchanged");
 static_assert(SLOTS_FLASH_OFFSET % FLASH_SECTOR_SIZE == 0);
 
 static SlotsData g_slots{};
+static constexpr uint32_t kGenerationMagic = 0x53474E31;
+
+uint32_t slot_generation(int slot) {
+    return slot >= 0 && slot < kNumSlots && g_slots.generation_magic == kGenerationMagic
+        ? g_slots.generation[slot] : 0;
+}
+
+static void advance_generation(int slot) {
+    if (g_slots.generation_magic != kGenerationMagic) {
+        g_slots.generation_magic = kGenerationMagic;
+        memset(g_slots.generation, 0, sizeof(g_slots.generation));
+    }
+    ++g_slots.generation[slot];
+}
 
 static const SlotsData *flash_slots() {
     return reinterpret_cast<const SlotsData *>(XIP_BASE + SLOTS_FLASH_OFFSET);
@@ -101,11 +124,23 @@ int slot_for_controller(int current, const uint8_t addr[6]) {
     return owner >= 0 ? owner : current;
 }
 
-bool slot_assign(int slot, const uint8_t addr[6]) {
+bool slot_is_ds4(int slot) {
+    return slot >= 0 && slot < kNumSlots && g_slots.occupied[slot] &&
+           g_slots.kind_magic == 0x34534b31u && g_slots.kind[slot] == 4;
+}
+
+bool slot_assign(int slot, const uint8_t addr[6], bool ds4) {
     // error: NOT-WORTH — false for a slot outside 0..3; every caller passes a checked slot
     if (slot < 0 || slot >= kNumSlots) return false;
+    if (!slot_occupied(slot) || memcmp(g_slots.addrs[slot], addr, 6) != 0) advance_generation(slot);
     memcpy(g_slots.addrs[slot], addr, 6);
     g_slots.occupied[slot] = 1;
+    if (g_slots.kind_magic != 0x34534b31u) {
+        g_slots.kind_magic = 0x34534b31u;
+        memset(g_slots.kind, 0, sizeof(g_slots.kind));
+    }
+    g_slots.kind[slot] = ds4 ? 4 : 0;
+    config_profiles_slot_changed(slot);
     // error: SHOWN — returned: the callers report a failed save (fixed in this pass: was dropped)
     return save_slots_to_flash();
 }
@@ -113,8 +148,10 @@ bool slot_assign(int slot, const uint8_t addr[6]) {
 bool slot_forget(int slot) {
     // error: NOT-WORTH — false for a slot outside 0..3; every caller passes a checked slot
     if (slot < 0 || slot >= kNumSlots) return false;
+    advance_generation(slot);
     memset(g_slots.addrs[slot], 0, 6);
     g_slots.occupied[slot] = 0;
+    config_profiles_slot_changed(slot);
     // error: SHOWN — returned: the callers report a failed save (fixed in this pass: was dropped)
     return save_slots_to_flash();
 }
@@ -122,8 +159,10 @@ bool slot_forget(int slot) {
 bool slots_wipe_all() {
     // loop: NOT-WORTH — 4 slots, on a user wipe (then one flash save)
     for (int i = 0; i < kNumSlots; i++) {
+        advance_generation(i);
         memset(g_slots.addrs[i], 0, 6);
         g_slots.occupied[i] = 0;
+        config_profiles_slot_changed(i);
     }
     // error: SHOWN — returned: the callers report a failed save (fixed in this pass: was dropped)
     return save_slots_to_flash();

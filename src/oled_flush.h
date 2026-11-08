@@ -30,6 +30,19 @@ struct BitReverseTable {
 };
 inline constexpr BitReverseTable kBitReverse{};
 
+// Rotate a 128x64 MSB-first framebuffer by 180 degrees: reverse row order and
+// reverse the bits within each row. Kept here so the host tests exercise the
+// exact transform the firmware sends to the panel.
+inline void rotate_180(const uint8_t *fb, uint8_t *out) {
+    // loop: HOT-PATH-OK — 64 rows at OLED flush, 10 Hz
+    for (int y = 0; y < kH; y++) {
+        const uint8_t *src = fb + (kH - 1 - y) * kRowBytes;
+        uint8_t *dst = out + y * kRowBytes;
+        // loop: HOT-PATH-OK — 16 bytes per row at OLED flush, 10 Hz
+        for (int i = 0; i < kRowBytes; i++) dst[i] = kBitReverse.v[src[kRowBytes - 1 - i]];
+    }
+}
+
 // One frame: page 0, then for each changed framebuffer row (a panel column, the
 // display is mounted rotated) the two column-address commands and the row's
 // 16 bytes. Sink needs cmd(const uint8_t*, int) and data(const uint8_t*, int);

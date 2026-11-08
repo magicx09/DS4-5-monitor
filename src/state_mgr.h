@@ -22,7 +22,8 @@ void state_get_led(uint8_t *r, uint8_t *g, uint8_t *b);
 // the DualSense takes each output report as the whole rumble state.
 // `ss` points at the SetStateData bytes of the report being built.
 void state_stamp_host_rumble(uint8_t *ss);
-// Forget the game's rumble (controller gone: a reconnect must not resume it).
+// Forget the game's rumble and HID audio overrides when the controller goes
+// away. Restore USB endpoint volume/mute for the next connection.
 void state_clear_host_rumble();
 // Player indicator (the 5 white LEDs under the touchpad) as last set by the
 // host: bits 0..4, one per LED left to right.

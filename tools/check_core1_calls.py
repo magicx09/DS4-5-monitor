@@ -31,6 +31,7 @@ ALLOWED = {
     "flash_safe_execute_core_init": "start-up: registers core1 for flash lockout",
     "mallinfo": "start-up: free heap for the 0xF5 health bytes",
     "sbrk": "start-up: free heap for the 0xF5 health bytes",
+    "btstack_sbc_encoder_bluedroid_init_instance": "DS4 SBC encoder start-up",
     "__wrap_printf": "start-up failure messages (encoder/decoder create); no serial in release builds",
     "__wrap_malloc": "start-up: opus_*_create",
     "__wrap_free": "start-up: opus_*_create (on failure)",

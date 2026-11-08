@@ -2,8 +2,8 @@
 // The RSSI refresh budget (bt.cpp): gap_read_rssi() answers asynchronously,
 // so bt_get_signal_strength() returns the cached value and asks for a fresh
 // one, at most every 100 ms (10 Hz) and with at most one request in flight
-// (a lost reply frees the slot after 1 s). Only reads trigger it: the OLED BT
-// Signal screen and the app's 0xF9, never a poll during gameplay. Pure, no
+// (a lost reply frees the slot after 1 s). Only reads trigger it: the OLED home
+// signal bar, BT Signal screen and the app's 0xF9. Pure, no
 // Pico SDK, for the host tests. From CLF184's PR #18.
 //
 // What the value means: on a Classic (BR/EDR) link HCI Read RSSI is not dBm.

@@ -3,6 +3,8 @@
 //
 
 #include "config.h"
+#include "controller_profile.h"
+#include "slots.h"
 
 #include <cmath>
 #include <cstddef>
@@ -23,6 +25,78 @@ constexpr uint32_t CONFIG_MAGIC = 0x66ccff00;
 constexpr uint16_t CONFIG_VERSION = 1;
 static Config config{};
 bool is_dse = false;
+
+namespace {
+constexpr uint32_t kProfilesMagic = 0x43505231; // CPR1
+struct __attribute__((packed)) ProfileRecord {
+    uint8_t occupied;
+    uint32_t generation;
+    uint8_t addr[6];
+    ControllerProfile prefs;
+    uint32_t crc;
+};
+struct __attribute__((packed)) ProfilePage {
+    uint32_t magic;
+    uint16_t version, size;
+    ProfileRecord slots[kNumSlots];
+};
+static_assert(sizeof(ProfilePage) <= FLASH_PAGE_SIZE);
+static_assert(2 * FLASH_PAGE_SIZE <= FLASH_SECTOR_SIZE);
+bool s_profiles_enabled = false;
+uint32_t s_profile_generation = 0;
+ProfileRecord s_profiles[kNumSlots]{}; // drafts; switching never implicitly saves them
+
+const ProfilePage *flash_profiles() {
+    return reinterpret_cast<const ProfilePage *>(XIP_BASE + CONFIG_FLASH_OFFSET + FLASH_PAGE_SIZE);
+}
+bool profiles_header_valid(const ProfilePage &p) {
+    return p.magic == kProfilesMagic && p.version == 1 && p.size == sizeof(ProfilePage);
+}
+uint32_t profile_crc(const ProfileRecord &r) {
+    return crc32(reinterpret_cast<const uint8_t *>(&r), offsetof(ProfileRecord, crc));
+}
+bool profile_binding_matches(const ProfileRecord &r, int slot) {
+    uint8_t addr[6]{};
+    if (slot_occupied(slot)) slot_get_addr(slot, addr);
+    return r.occupied == (slot_occupied(slot) ? 1 : 0) && r.generation == slot_generation(slot) &&
+           memcmp(r.addr, addr, 6) == 0;
+}
+ProfileRecord profile_record(int slot, const ControllerProfile &p) {
+    ProfileRecord r{};
+    r.occupied = slot_occupied(slot) ? 1 : 0;
+    r.generation = slot_generation(slot);
+    if (r.occupied) slot_get_addr(slot, r.addr);
+    r.prefs = p;
+    r.crc = profile_crc(r);
+    return r;
+}
+bool saved_profile(int slot, ControllerProfile &out) {
+    const auto &p = *flash_profiles();
+    if (!profiles_header_valid(p) || slot < 0 || slot >= kNumSlots) return false;
+    const auto &r = p.slots[slot];
+    if (r.crc != profile_crc(r) || !profile_binding_matches(r, slot)) return false;
+    out = r.prefs;
+    return true;
+}
+ControllerProfile default_controller_profile();
+void apply_saved_profile(Config_body &body, int slot) {
+    ControllerProfile p{};
+    if (!saved_profile(slot, p)) p = default_controller_profile();
+    apply_controller_profile(body, p);
+}
+void select_controller_profile(uint8_t slot) {
+    if (!s_profiles_enabled) { config.body.current_slot = slot; return; }
+    const int old = config.body.current_slot;
+    config_profiles_slot_changed(old);
+    s_profiles[old] = profile_record(old, controller_profile(config.body));
+    config_profiles_slot_changed(slot);
+    config.body.current_slot = slot;
+    apply_controller_profile(config.body, s_profiles[slot].prefs);
+    if (old != slot) ++s_profile_generation;
+}
+} // namespace
+
+static bool write_config(Config &con, const ProfilePage *profiles = nullptr);
 
 // 编译期保护
 // 判断Config结构体是否能放进flash 256bytes
@@ -61,11 +135,11 @@ static void config_normalise(Config &c) {
         printf("[Config] Config Body size is invalid\n");
     }
     auto body = &c.body;
-    if (std::isnan(body->haptics_gain) || body->haptics_gain < 1.0f || body->haptics_gain > 6.0f) {
+    if (std::isnan(body->haptics_gain) || body->haptics_gain < 0.0f || body->haptics_gain > 6.0f) {
         body->haptics_gain = 1.0f;
         printf("[Config] Haptics Gain value is invalid\n");
     }
-    if (std::isnan(body->haptics_gain_right) || body->haptics_gain_right < 1.0f || body->haptics_gain_right > 6.0f) {
+    if (std::isnan(body->haptics_gain_right) || body->haptics_gain_right < 0.0f || body->haptics_gain_right > 6.0f) {
         body->haptics_gain_right = body->haptics_gain;
     }
     if (std::isnan(body->speaker_volume) || body->speaker_volume < -100 || body->speaker_volume > 12) {
@@ -160,6 +234,7 @@ static void config_normalise(Config &c) {
     if (body->disconnect_on_dock > 1) body->disconnect_on_dock = 0;  // protocol 1.22: off
     if (c.power_flags & ~POWER_FLAGS_MASK) c.power_flags = POWER_FLAGS_DEFAULT; // 0xFF erased / older firmware
     c.display_id = display::resolve(c.display_id);  // 0xFF from firmware before 1.21: the Pico-OLED-1.3
+    if (c.screen_flipped > 1) c.screen_flipped = 0;  // 0xFF from firmware before home8
     if (body->config_version != CONFIG_VERSION) {
         body->config_version = CONFIG_VERSION;
         printf("[Config] Warning: Config may breaking change\n");
@@ -168,15 +243,73 @@ static void config_normalise(Config &c) {
 
 void config_valid() { config_normalise(config); }
 
+namespace {
+ControllerProfile default_controller_profile() {
+    Config defaults{};
+    memset(&defaults.body, 0xFF, sizeof(defaults.body));
+    config_normalise(defaults);
+    return controller_profile(defaults.body);
+}
+} // namespace
+
+bool config_profiles_init() {
+    const bool migrate = !profiles_header_valid(*flash_profiles());
+    const auto previous = controller_profile(config.body);
+    for (int i = 0; i < kNumSlots; ++i) {
+        ControllerProfile p{};
+        if (!saved_profile(i, p)) p = migrate ? previous : default_controller_profile();
+        Config normalised = config;
+        apply_controller_profile(normalised.body, p);
+        config_normalise(normalised);
+        s_profiles[i] = profile_record(i, controller_profile(normalised.body));
+    }
+    s_profiles_enabled = true;
+    ++s_profile_generation;
+    apply_controller_profile(config.body, s_profiles[config.body.current_slot].prefs);
+    if (!migrate) return true;
+    // One-time upgrade: every slot starts with the old shared preferences,
+    // including the DS5 audio lock. Save before any slot can be edited.
+    ProfilePage p{kProfilesMagic, 1, sizeof(ProfilePage), {}};
+    memcpy(p.slots, s_profiles, sizeof(s_profiles));
+    return write_config(config, &p);
+}
+
+void config_profiles_slot_changed(int slot) {
+    if (!s_profiles_enabled || slot < 0 || slot >= kNumSlots || profile_binding_matches(s_profiles[slot], slot)) return;
+    const auto old = s_profiles[slot];
+    // Pairing into the selected empty slot keeps any settings prepared there.
+    // Forget/replacement resets it. Generation also catches forgetting and
+    // re-pairing the same MAC across a reboot, so old preferences cannot return.
+    const bool newly_paired = !old.occupied && slot_occupied(slot) && slot_generation(slot) == old.generation + 1u;
+    const auto prefs = newly_paired
+        ? (slot == config.body.current_slot ? controller_profile(config.body) : old.prefs)
+        : default_controller_profile();
+    s_profiles[slot] = profile_record(slot, prefs);
+    if (slot == config.body.current_slot) {
+        apply_controller_profile(config.body, prefs);
+        ++s_profile_generation;
+    }
+}
+
+uint32_t config_profile_generation() { return s_profile_generation; }
+
 // True when the settings in RAM differ from the ones saved in flash (or
 // nothing valid is saved yet). Core 0 only, like every flash write, so the
 // XIP read never races a write.
 bool config_unsaved() {
     const Config *saved = flash_config();
+    Config_body saved_body = saved->body;
+    if (s_profiles_enabled) {
+        ControllerProfile p{};
+        if (!saved_profile(config.body.current_slot, p)) return true;
+        apply_controller_profile(saved_body, p);
+    }
     // error: NOT-WORTH — nothing; reads which copy to start from (no valid save yet = the RAM copy), not a failure
     // display_id as it resolves: a page from older firmware (0xFF) isn't an unsaved change.
-    return saved->magic != CONFIG_MAGIC || memcmp(&saved->body, &config.body, sizeof(Config_body)) != 0 ||
-           saved->power_flags != config.power_flags || display::resolve(saved->display_id) != config.display_id;
+    const uint8_t saved_flip = saved->screen_flipped > 1 ? 0 : saved->screen_flipped;
+    return saved->magic != CONFIG_MAGIC || memcmp(&saved_body, &config.body, sizeof(Config_body)) != 0 ||
+           saved->power_flags != config.power_flags || display::resolve(saved->display_id) != config.display_id ||
+           saved_flip != config.screen_flipped;
 }
 
 // A saved page is intact when its magic is ours and its CRC matches the body
@@ -248,10 +381,12 @@ static Config saved_page_or_ram() {
     // Each field as load reads it: a short body's 0xFF fields at their
     // defaults, so the saved copy then matches RAM (config_unsaved).
     config_normalise(page);
+    if (s_profiles_enabled) apply_saved_profile(page.body, page.body.current_slot);
     return page;
 }
 
 void config_load() {
+    s_profiles_enabled = false; // slots are loaded next; init binds profiles to them
     // error: LOGGED-OK — checked below: a bad copy prints and loads defaults (or migrates), shown as unsaved settings in the app
     const bool intact = config_page_intact(flash_config());
     memcpy(&config, flash_config(), sizeof(Config));
@@ -281,6 +416,7 @@ void config_load() {
         memset(&config.body, 0xFF, sizeof(config.body));
         config.power_flags = 0xFF;
         config.display_id = 0xFF;
+        config.screen_flipped = 0xFF;
     } else {
         config_take_short_body(flash_config());
         // A migration that lost power after the new copy was saved: finish it.
@@ -307,14 +443,20 @@ void config_default_keep_slot(uint8_t slot) {
     config_valid();  // an out-of-range slot reads as 0, as on load
 }
 
-static bool write_config(Config &con) {
+static bool write_config(Config &con, const ProfilePage *profiles) {
     con.crc32 = calc_config_crc(con);
-    alignas(4) uint8_t page[FLASH_PAGE_SIZE];
+    alignas(4) uint8_t page[2 * FLASH_PAGE_SIZE];
     memset(page, 0xff, sizeof(page));
     memcpy(page, &con, sizeof(Config));
+    // All single-setting saves preserve page 2, including unknown/newer data.
+    memcpy(page + FLASH_PAGE_SIZE, flash_profiles(), FLASH_PAGE_SIZE);
+    if (profiles) {
+        memset(page + FLASH_PAGE_SIZE, 0xFF, FLASH_PAGE_SIZE);
+        memcpy(page + FLASH_PAGE_SIZE, profiles, sizeof(*profiles));
+    }
 
     // error: SHOWN — passed up; the callers report it (0xF1 CMD_RESULT_FAILED to the app, the OLED's "Save FAIL")
-    if (!flash_sector_write(CONFIG_FLASH_OFFSET, page)) {
+    if (!flash_sector_write(CONFIG_FLASH_OFFSET, page, sizeof(page))) {
         printf("[Flash] core1 lockout timed out, write skipped\n");
         // error: SHOWN — passed up; the callers report it (0xF1 CMD_RESULT_FAILED to the app, the OLED's "Save FAIL")
         return false;
@@ -324,7 +466,7 @@ static bool write_config(Config &con) {
     memcpy(&verify, flash_config(), sizeof(verify));
     const auto verify_crc32 = calc_config_crc(verify);
     // error: SHOWN — passed up; the callers report it (0xF1 CMD_RESULT_FAILED to the app, the OLED's "Save FAIL")
-    if (verify_crc32 == con.crc32) {
+    if (verify_crc32 == con.crc32 && memcmp(flash_config(), page, sizeof(page)) == 0) {
         printf("[Config] Config write flash verify success\n");
         return true;
     }
@@ -334,7 +476,19 @@ static bool write_config(Config &con) {
 }
 
 // error: SHOWN — passed up; the callers report it (0xF1 CMD_RESULT_FAILED to the app, the OLED's "Save FAIL")
-bool config_save() { return write_config(config); }
+bool config_save() {
+    if (!s_profiles_enabled) return write_config(config);
+    const int slot = config.body.current_slot;
+    config_profiles_slot_changed(slot);
+    s_profiles[slot] = profile_record(slot, controller_profile(config.body));
+    ProfilePage page = *flash_profiles();
+    if (!profiles_header_valid(page)) {
+        page = {kProfilesMagic, 1, sizeof(ProfilePage), {}};
+        memcpy(page.slots, s_profiles, sizeof(s_profiles));
+    }
+    page.slots[slot] = s_profiles[slot];
+    return write_config(config, &page);
+}
 
 bool config_save_narrator(uint8_t value) {
     config.body.narrator_voice = value;
@@ -351,7 +505,8 @@ bool config_save_narrator(uint8_t value) {
 }
 
 bool config_save_current_slot(uint8_t slot) {
-    config.body.current_slot = slot;
+    if (slot >= kNumSlots) return false;
+    select_controller_profile(slot);
     config_valid();
     // Flash's copy with only this byte changed; nothing valid saved yet = RAM.
     Config page = saved_page_or_ram();
@@ -359,6 +514,7 @@ bool config_save_current_slot(uint8_t slot) {
     page.version = CONFIG_VERSION;
     page.size = sizeof(Config_body);
     page.body.current_slot = config.body.current_slot;
+    if (s_profiles_enabled) apply_saved_profile(page.body, slot);
     if (page.power_flags & ~POWER_FLAGS_MASK) page.power_flags = POWER_FLAGS_DEFAULT;
     // error: SHOWN — passed up; the callers report it (0xF1 CMD_RESULT_FAILED to the app, the OLED's "Save FAIL")
     return write_config(page);
@@ -399,6 +555,19 @@ bool config_save_display_id(uint8_t id) {
     if (page.power_flags & ~POWER_FLAGS_MASK) page.power_flags = POWER_FLAGS_DEFAULT;
     page.display_id = id;
     // error: SHOWN — passed up; the callers report it (0xF1 CMD_RESULT_FAILED to the app, the OLED's "Save FAIL")
+    return write_config(page);
+}
+
+bool config_screen_flipped() { return config.screen_flipped != 0; }
+
+bool config_save_screen_flipped(bool flipped) {
+    config.screen_flipped = flipped ? 1 : 0;
+    Config page = saved_page_or_ram();
+    page.magic = CONFIG_MAGIC;
+    page.version = CONFIG_VERSION;
+    page.size = sizeof(Config_body);
+    if (page.power_flags & ~POWER_FLAGS_MASK) page.power_flags = POWER_FLAGS_DEFAULT;
+    page.screen_flipped = config.screen_flipped;
     return write_config(page);
 }
 

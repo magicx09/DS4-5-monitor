@@ -55,6 +55,31 @@ TEST(oled_flush_bit_reverse_table) {
     for (int i = 0; i < 256; i++) CHECK_EQ(oled_flush::kBitReverse.v[i], reverse_byte((uint8_t) i));
 }
 
+TEST(oled_flush_rotate_180) {
+    uint8_t src[oled_flush::kFbBytes], dst[oled_flush::kFbBytes];
+    std::memset(src, 0, sizeof(src));
+    auto set = [&](int x, int y, bool on) {
+        if (on) src[y * oled_flush::kRowBytes + x / 8] |= (uint8_t) (0x80u >> (x % 8));
+    };
+    set(0, 0, true);
+    set(7, 1, true);
+    set(64, 31, true);
+    set(120, 62, true);
+    set(127, 63, true);
+    oled_flush::rotate_180(src, dst);
+    auto get = [&](int x, int y) {
+        return (dst[y * oled_flush::kRowBytes + x / 8] & (0x80u >> (x % 8))) != 0;
+    };
+    CHECK(get(127, 63));
+    CHECK(get(120, 62));
+    CHECK(get(63, 32));
+    CHECK(get(7, 1));
+    CHECK(get(0, 0));
+    int lit = 0;
+    for (uint8_t b : dst) lit += __builtin_popcount(b);
+    CHECK_EQ(lit, 5);
+}
+
 TEST(oled_flush_same_bytes_as_before) {
     uint8_t fb[oled_flush::kFbBytes];
     std::memset(fb, 0, sizeof(fb));

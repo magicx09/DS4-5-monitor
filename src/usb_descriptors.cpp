@@ -27,6 +27,7 @@
 #include "tusb.h"
 #include "config.h"
 #include "bt.h"
+#include "ds4_descriptor.h"
 #include "slots.h"
 #include "usb_power.h"
 #if ENABLE_COMPANION_VENDOR
@@ -121,15 +122,11 @@ tusb_desc_device_t desc_device =
 
     .iManufacturer = 0x01,
     .iProduct = 0x02,
-    // OLED Edition restores the per-board serial number that upstream stripped
-    // in commit e79c762 ("remove usb serialnumber #32"). Without it, Windows
-    // treats the dongle as a NEW device for each USB port (issue awalol#100):
-    // users lose their per-device volume / app preferences when they move
-    // ports. The trade-off (re-introducing SpecialK incompatibility from #32)
-    // affects only Windows users with that specific tool; the broader Windows
-    // population gets stable device identity back. The serial string itself
-    // is produced by board_usb_get_serial() from the flash chip's unique ID.
-    .iSerialNumber = STRID_SERIAL,
+    // Match the wired DualSense identity. Some host input layers (including
+    // SpecialK, upstream e79c762/#32) treat a HID serial as a Bluetooth pad,
+    // bypassing USB-only audio paths. Feature 0x09 still supplies the pad MAC.
+    // DS4 retains its already-tested identity in the device callback below.
+    .iSerialNumber = 0,
 
     .bNumConfigurations = 0x01
 };
@@ -209,11 +206,41 @@ static uint8_t const desc_configuration_wake_kbd[] = {
     TUD_HID_DESCRIPTOR(0, 0, HID_ITF_PROTOCOL_KEYBOARD, sizeof(desc_hid_report_wake_kbd), 0x81, 8, 10),
 };
 
+// DS4 mode: UAC1 speaker OUT plus HID.  The microphone interface is omitted
+// deliberately; this keeps Windows from opening a capture endpoint and lets
+// the firmware focus on the DS4's native SBC speaker stream.
+static uint8_t desc_configuration_ds4[] = {
+    TUD_CONFIG_DESCRIPTOR(1, 3, 0, 143,
+                          TUSB_DESC_CONFIG_ATT_REMOTE_WAKEUP, 100),
+    // Audio Control interface (speaker only; wTotalLength = 41).
+    0x09, 0x04, 0x00, 0x00, 0x00, 0x01, 0x01, 0x00, 0x00,
+    0x0A, 0x24, 0x01, 0x00, 0x01, 0x29, 0x00, 0x01, 0x01, 0x00,
+    0x0C, 0x24, 0x02, 0x01, 0x01, 0x01, 0x00, 0x02, 0x03, 0x00, 0x00, 0x00,
+    0x0A, 0x24, 0x06, 0x02, 0x01, 0x01, 0x03, 0x00, 0x00, 0x00,
+    0x09, 0x24, 0x03, 0x03, 0x02, 0x04, 0x00, 0x02, 0x00,
+    // Audio Streaming OUT, alternate 0 and 1, 32 kHz stereo S16.
+    0x09, 0x04, 0x01, 0x00, 0x00, 0x01, 0x02, 0x00, 0x00,
+    0x09, 0x04, 0x01, 0x01, 0x01, 0x01, 0x02, 0x00, 0x00,
+    0x07, 0x24, 0x01, 0x01, 0x01, 0x01, 0x00,
+    0x0B, 0x24, 0x02, 0x01, 0x02, 0x02, 0x10, 0x01, 0x00, 0x7D, 0x00,
+    0x09, 0x05, 0x01, 0x09, 0x84, 0x00, 0x01, 0x00, 0x00,
+    0x07, 0x25, 0x01, 0x00, 0x00, 0x00, 0x00,
+    // HID interface 2.
+    0x09, 0x04, 0x02, 0x00, 0x02, 0x03, 0x00, 0x00, 0x00,
+    0x09, 0x21, 0x11, 0x01, 0x00, 0x01, 0x22,
+    static_cast<uint8_t>(sizeof(desc_hid_report_ds4) & 0xff),
+    static_cast<uint8_t>(sizeof(desc_hid_report_ds4) >> 8),
+    0x07, 0x05, 0x84, 0x03, 0x40, 0x00, 0x01,
+    0x07, 0x05, 0x03, 0x03, 0x40, 0x00, 0x01,
+};
+static_assert(sizeof(desc_configuration_ds4) == 143);
+
 // Invoked when received GET DEVICE DESCRIPTOR
 // Application return pointer to descriptor
 uint8_t const *tud_descriptor_device_cb(void) {
     if (usb_wake_keyboard()) return reinterpret_cast<uint8_t const *>(&desc_device_wake_kbd);
-    desc_device.idProduct = ds_mode() ? 0x0CE6 : 0x0DF2;
+    desc_device.idProduct = usb_ds4() ? 0x09CC : ds_mode() ? 0x0CE6 : 0x0DF2;
+    desc_device.iSerialNumber = usb_ds4() ? STRID_SERIAL : 0;
     return reinterpret_cast<uint8_t const *>(&desc_device);
 }
 
@@ -511,6 +538,14 @@ uint8_t descriptor_configuration[] = {
 uint8_t const *tud_descriptor_configuration_cb(uint8_t index) {
     (void) index; // for multiple configurations
     if (usb_wake_keyboard()) return desc_configuration_wake_kbd;
+    if (usb_ds4()) {
+        const uint8_t mode = get_config().polling_rate_mode;
+        const uint8_t interval = mode == 0 ? 4 : mode == 1 ? 2 : 1;
+        desc_configuration_ds4[7] = usb_power_wake_enabled() ? 0xa0 : 0x80;
+        desc_configuration_ds4[sizeof(desc_configuration_ds4)-1] = interval;
+        desc_configuration_ds4[sizeof(desc_configuration_ds4)-8] = interval;
+        return desc_configuration_ds4;
+    }
     // Remote wakeup only with "PS wakes the PC" on (the PC may then arm it
     // while it sleeps with a controller connected); otherwise byte-identical
     // to before. Nothing a game reads: the HID descriptor and the interfaces
@@ -925,6 +960,7 @@ static_assert(sizeof(desc_hid_report_dse) == 0x01B5);
 uint8_t const *tud_hid_descriptor_report_cb(uint8_t itf) {
     (void) itf;
     if (usb_wake_keyboard()) return desc_hid_report_wake_kbd;
+    if (usb_ds4()) return desc_hid_report_ds4;
     if (ds_mode()) {
         return desc_hid_report_ds;
     }
@@ -988,7 +1024,9 @@ uint16_t const *tud_descriptor_string_cb(uint8_t index, uint16_t langid) {
         return _desc_str;
     }
 
-    if (ds_mode()) {
+    if (usb_ds4()) {
+        string_desc_arr[2] = "Wireless Controller";
+    } else if (ds_mode()) {
         string_desc_arr[2] = "DualSense Wireless Controller";
     }else {
         string_desc_arr[2] = "DualSense Edge Wireless Controller";
@@ -1001,14 +1039,10 @@ uint16_t const *tud_descriptor_string_cb(uint8_t index, uint16_t langid) {
             break;
 
         case STRID_SERIAL: {
-            // Present like a REAL DualSense: USB serial == controller MAC, the
-            // same value the 0x09 pairing-info feature report returns. Before
-            // this the serial was the Pico flash unique id, so the host saw two
-            // identities for one controller (flash-id over USB, MAC over 0x09)
-            // and Wine/Steam device-matching choked. Prefer the live connected
-            // MAC; fall back to the current slot's stored MAC (known at boot,
-            // before BT connects); finally fall back to the flash id if never
-            // paired so the descriptor is always valid.
+            // Only the established DS4 persona exposes this serial. DS5/DSE
+            // use the wired identity above; the wake keyboard has its own case.
+            if (!usb_ds4()) return nullptr;
+            // Prefer the live MAC, then the paired slot, finally the board ID.
             uint8_t mac[6] = {0};
             bool have = false;
             bt_get_addr(mac);
@@ -1038,7 +1072,7 @@ uint16_t const *tud_descriptor_string_cb(uint8_t index, uint16_t langid) {
             // Microsoft OS 1.0 string: "MSFT100" + vendor code. Windows asks for
             // it once per VID/PID/bcdDevice and then requests the WinUSB
             // compat-ID / interface-GUID descriptors (vendor_itf.cpp).
-            return ms_os_string_descriptor();
+            return usb_ds4() ? nullptr : ms_os_string_descriptor();
 #endif
 
         default:

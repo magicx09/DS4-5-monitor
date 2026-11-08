@@ -9,6 +9,9 @@
 #include <algorithm>
 #include "pico/time.h"
 #include "usb.h"
+#include "bt.h"
+#include "usb_power.h"
+#include "audio.h"
 
 uint8_t mute[2]; // 0: SPEAKER(0x02) 1: MIC(0x05)
 // What the PC last set, and what GET_CUR reads back. The speaker starts at
@@ -36,6 +39,7 @@ uint64_t usb_host_speaker_set_us() { return s_host_spk_set_us; }
 static bool audio10_set_req_entity(tusb_control_request_t const *p_request, uint8_t *pBuff) {
     uint8_t ctrlSel = TU_U16_HIGH(p_request->wValue);
     uint8_t entityID = TU_U16_HIGH(p_request->wIndex);
+    if (usb_ds4() && entityID != UAC1_ENTITY_SPK_FEATURE_UNIT) return false;
     uint8_t index = entityID == UAC1_ENTITY_SPK_FEATURE_UNIT ? 0 : 1;
 
     // If request is for our speaker feature unit
@@ -52,7 +56,11 @@ static bool audio10_set_req_entity(tusb_control_request_t const *p_request, uint
                         // The PC's mute switches reach the controller too
                         // (upstream cfca2a5); the speaker's PCM is also zeroed
                         // in audio_loop, as before.
-                        state_set_audio_mute(mute[1] != 0, mute[0] != 0);
+                        if (usb_ds4()) {
+                            ds4_audio_controls(true);
+                        } else {
+                            state_set_audio_mute(mute[1] != 0, mute[0] != 0);
+                        }
 
                         TU_LOG2("    Set Mute: %d of entity: %u\r\n", mute[index], entityID);
                         return true;
@@ -84,7 +92,11 @@ static bool audio10_set_req_entity(tusb_control_request_t const *p_request, uint
                         // scaled to 127 (amp_volume.h).
                         if (entityID == UAC1_ENTITY_SPK_FEATURE_UNIT) {
                             s_host_spk_set_us = time_us_64();
-                            state_set_volume(headphone_amp_from_db(volume[index]), speaker_amp_from_db(volume[index]));
+                            if (usb_ds4()) {
+                                ds4_audio_controls(true);
+                            } else {
+                                state_set_volume(headphone_amp_from_db(volume[index]), speaker_amp_from_db(volume[index]));
+                            }
                         }
                         // The PC's mic volume, 0..48 dB (our range below), as
                         // the controller's VolumeMic 0..0x40 (it tops out at
@@ -118,6 +130,7 @@ static bool audio10_set_req_entity(tusb_control_request_t const *p_request, uint
 static bool audio10_get_req_entity(uint8_t rhport, tusb_control_request_t const *p_request) {
     uint8_t ctrlSel = TU_U16_HIGH(p_request->wValue);
     uint8_t entityID = TU_U16_HIGH(p_request->wIndex);
+    if (usb_ds4() && entityID != UAC1_ENTITY_SPK_FEATURE_UNIT) return false;
     uint8_t index = entityID == UAC1_ENTITY_SPK_FEATURE_UNIT ? 0 : 1;
 
     // If request is for our speaker feature unit
@@ -138,7 +151,10 @@ static bool audio10_get_req_entity(uint8_t rhport, tusb_control_request_t const 
                             // amp). It used to read back the app's speaker trim
                             // (speaker_volume), a different control, so after a
                             // replug the PC's slider and the amp disagreed.
-                            int16_t vol = volume[index] * 256; // convert to 1/256 dB units
+                            float current = volume[index];
+                            if (usb_ds4() && entityID == UAC1_ENTITY_SPK_FEATURE_UNIT)
+                                current = std::clamp(current, -73.0f, -1.0f);
+                            int16_t vol = static_cast<int16_t>(current * 256); // convert to 1/256 dB units
                             // error: NOT-WORTH — returned to TinyUSB (STALL on failure); a 1-2 byte reply into TinyUSB's control buffer can't fail
                             return tud_audio_buffer_and_schedule_control_xfer(rhport, p_request, &vol, sizeof(vol));
                         }
@@ -147,8 +163,13 @@ static bool audio10_get_req_entity(uint8_t rhport, tusb_control_request_t const 
                         TU_LOG2("    Get Volume min of entity: %u\r\n", entityID); {
                             uint8_t min[2];
                             if (entityID == UAC1_ENTITY_SPK_FEATURE_UNIT) {
-                                min[0] = 0x00;
-                                min[1] = 0x9c;
+                                if (usb_ds4()) {
+                                    min[0] = 0x00;
+                                    min[1] = 0xB7; // -73 dB in 1/256 dB units
+                                } else {
+                                    min[0] = 0x00;
+                                    min[1] = 0x9c;
+                                }
                             }else {
                                 min[0] = 0x00;
                                 min[1] = 0x00;
@@ -161,8 +182,13 @@ static bool audio10_get_req_entity(uint8_t rhport, tusb_control_request_t const 
                         TU_LOG2("    Get Volume max of entity: %u\r\n", entityID); {
                             uint8_t max[2];
                             if (entityID == UAC1_ENTITY_SPK_FEATURE_UNIT) {
-                                max[0] = 0x00;
-                                max[1] = 0x00;
+                                if (usb_ds4()) {
+                                    max[0] = 0x00;
+                                    max[1] = 0xFF; // -1 dB
+                                } else {
+                                    max[0] = 0x00;
+                                    max[1] = 0x00;
+                                }
                             }else {
                                 max[0] = 0x00;
                                 max[1] = 0x30;
